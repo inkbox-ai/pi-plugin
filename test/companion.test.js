@@ -177,7 +177,9 @@ test("Slack reconnect cannot send an answer generated for the old connection", a
         event: { text: "hi" },
       },
     },
-    id, [], { slackEnabled: true },
+    id,
+    [],
+    { slackEnabled: true },
   );
   const conn = {
     id: "conn",
@@ -275,6 +277,7 @@ test("subscriptions request receipts for every configured messaging channel", as
   );
   const wanted = rows.flatMap((row) => row.eventTypes);
   for (const type of [
+    "message.transcription_finished",
     "message.failed",
     "message.bounced",
     "text.delivery_failed",
@@ -362,31 +365,75 @@ test("SMS group membership is authoritative even without group fields in the web
 });
 
 test("Slack wakes and subscriptions require an explicit opt-in", async () => {
-  const event = { id:"evt", event_type:"slack.dm_received", data:{
-    identity_id:id.id, connection_id:"conn", workspace_id:"team", actor_id:"peer",
-    message_ts:"900.01", conversation_id:"dm", event:{text:"hello"},
-  }};
+  const event = {
+    id: "evt",
+    event_type: "slack.dm_received",
+    data: {
+      identity_id: id.id,
+      connection_id: "conn",
+      workspace_id: "team",
+      actor_id: "peer",
+      message_ts: "900.01",
+      conversation_id: "dm",
+      event: { text: "hello" },
+    },
+  };
   assert.equal(parseRoute(event, id), null);
-  assert.ok(parseRoute(event, id, [], {slackEnabled:true}));
+  assert.ok(parseRoute(event, id, [], { slackEnabled: true }));
   for (const slackEnabled of [false, true]) {
     const rows = [];
-    const subscriptions = {list: async () => [], create: async row => rows.push(row)};
-    await subscribe({webhooks:{subscriptions}}, id, "https://example.com/events", {slackEnabled});
-    assert.equal(rows.some(row => row.eventTypes.includes("slack.dm_received")), slackEnabled);
+    const subscriptions = {
+      list: async () => [],
+      create: async (row) => rows.push(row),
+    };
+    await subscribe(
+      { webhooks: { subscriptions } },
+      id,
+      "https://example.com/events",
+      { slackEnabled },
+    );
+    assert.equal(
+      rows.some((row) => row.eventTypes.includes("slack.dm_received")),
+      slackEnabled,
+    );
   }
 });
 
 test("a changed reply-all audience is not sent a previously generated reply", async () => {
-  const event = {id:"evt", event_type:"message.received", data:{message:{
-    direction:"inbound", id:"source", mailbox_id:"box", thread_id:"thread",
-    from_address:"sender@example.com", body:"hello",
-  }}};
-  const source = { id:"source", direction:"inbound", mailboxId:"box", threadId:"thread",
-    fromAddress:"sender@example.com", bodyText:"hello", replyAllRecipients:{to:["sender@example.com"],cc:[]} };
-  const owner = { ...id, mailbox:{id:"box",emailAddress:"agent@example.com"}, getMessage:async () => source,
-    replyAllEmail:async () => assert.fail("must not send") };
+  const event = {
+    id: "evt",
+    event_type: "message.received",
+    data: {
+      message: {
+        direction: "inbound",
+        id: "source",
+        mailbox_id: "box",
+        thread_id: "thread",
+        from_address: "sender@example.com",
+        body: "hello",
+      },
+    },
+  };
+  const source = {
+    id: "source",
+    direction: "inbound",
+    mailboxId: "box",
+    threadId: "thread",
+    fromAddress: "sender@example.com",
+    bodyText: "hello",
+    replyAllRecipients: { to: ["sender@example.com"], cc: [] },
+  };
+  const owner = {
+    ...id,
+    mailbox: { id: "box", emailAddress: "agent@example.com" },
+    getMessage: async () => source,
+    replyAllEmail: async () => assert.fail("must not send"),
+  };
   const route = parseRoute(event, owner);
   assert.ok(await beforeTurn(route, {}, owner));
   source.replyAllRecipients.cc.push("new@example.com");
-  await assert.rejects(sendReply(route, "answer", "key", {}, owner), /destination changed/);
+  await assert.rejects(
+    sendReply(route, "answer", "key", {}, owner),
+    /destination changed/,
+  );
 });

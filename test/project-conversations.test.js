@@ -171,9 +171,15 @@ test("trusted sessions survive restart but revocation suppresses saved replies a
     await runtime?.close();
     await rm(home, { recursive: true, force: true });
   });
-  identity.sendIMessage = async ({ replyToMessageId }) => {
+  identity.sendIMessage = async ({
+    conversationId,
+    text,
+    replyToMessageId,
+  }) => {
+    assert.equal(conversationId, "conversation");
+    assert.equal(replyToMessageId, undefined);
     if (failSend) throw new Error("offline");
-    sent.push(replyToMessageId);
+    sent.push(text);
   };
   function open(trustedConversations) {
     runtime = createGatewayRuntime(
@@ -195,7 +201,7 @@ test("trusted sessions survive restart but revocation suppresses saved replies a
             route.text,
           ]);
           await writeFile(file, route.message);
-          return "reply";
+          return route.message;
         },
       },
     );
@@ -252,3 +258,78 @@ test("trusted sessions survive restart but revocation suppresses saved replies a
   assert.deepEqual(turns[3], ["fourth", true, "", source.content]);
   assert.deepEqual(sent, ["first", "third", "fourth"]);
 });
+
+test(
+  "project model turns cannot race each other's file edits; unrelated tool-free turns still run",
+  { timeout: 10000 },
+  async (t) => {
+    const home = await mkdtemp(join(tmpdir(), "inkbox-pi-project-lane-"));
+    const { identity, source, destination } = resources();
+    identity.getIMessage = async (id) => ({
+      ...source,
+      id,
+      conversationId: id,
+    });
+    identity.getIMessageConversation = async (id) => ({ ...destination, id });
+    const release = Promise.withResolvers(),
+      first = Promise.withResolvers(),
+      ordinary = Promise.withResolvers(),
+      second = Promise.withResolvers();
+    const entries = [];
+    const runtime = createGatewayRuntime(
+      {
+        home,
+        baseUrl: "https://example.com",
+        projectDirectory: home,
+        projectFiles: ["project.txt"],
+        trustedConversations: ["first", "second"].map(
+          (id) => "imessage:" + id + ":" + peer,
+        ),
+      },
+      {
+        identity,
+        client: {},
+        async turn(_, candidate, file) {
+          entries.push("start " + candidate.message);
+          if (candidate.message === "first") {
+            first.resolve();
+            await release.promise;
+          }
+          if (candidate.message === "ordinary") ordinary.resolve();
+          await writeFile(file, candidate.message);
+          entries.push("end " + candidate.message);
+          if (candidate.message === "second") second.resolve();
+          return "ok";
+        },
+        async reply() {},
+      },
+    );
+    t.after(async () => {
+      release.resolve();
+      await runtime.close();
+      await rm(home, { recursive: true, force: true });
+    });
+    for (const id of ["first", "second", "ordinary"]) {
+      runtime.acceptVerified({
+        id,
+        event_type: "imessage.received",
+        data: {
+          message: {
+            id,
+            conversation_id: id,
+            direction: "inbound",
+            remote_number: peer,
+            sender_access: "direct",
+            content: "hello",
+          },
+        },
+      });
+    }
+    await Promise.all([first.promise, ordinary.promise]);
+    assert.ok(entries.includes("start first"));
+    assert.equal(entries.includes("start second"), false);
+    release.resolve();
+    await second.promise;
+    assert.ok(entries.indexOf("end first") < entries.indexOf("start second"));
+  },
+);

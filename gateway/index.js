@@ -6,7 +6,11 @@ import { checkPiModel } from "./preflight.js";
 import { startupProblem } from "./diagnostics.js";
 import { problem } from "../cli/errors.js";
 import { InvalidExternalEvent } from "./external.js";
-import { createClient, verifiedIdentity } from "../cli/setup.js";
+import {
+  createClient,
+  signingKeyReady,
+  verifiedIdentity,
+} from "../cli/setup.js";
 import { subscribe } from "./channels.js";
 import { createGatewayRuntime } from "./runtime.js";
 export { createGatewayRuntime };
@@ -80,6 +84,14 @@ export async function startGateway(config) {
     identity = await verifiedIdentity(client, config.identity);
   } catch (error) {
     throw startupProblem("identity verification", error);
+  }
+  try {
+    if (!(await signingKeyReady(config, identity)))
+      throw problem(
+        "Webhook signing key is missing or has changed. Rerun inkbox-pi setup before starting the gateway.",
+      );
+  } catch (error) {
+    throw startupProblem("signing key verification", error);
   }
   try {
     runtime = createGatewayRuntime(config, { client, identity });

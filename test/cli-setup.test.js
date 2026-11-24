@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { configure } from "../cli/setup.js";
+import { configure, signingKeyReady } from "../cli/setup.js";
 import { loadConfig, readProfile, saveProfile } from "../cli/config.js";
 
 function fixture(t) {
@@ -12,48 +12,90 @@ function fixture(t) {
   const config = loadConfig({ HOME: home, INKBOX_PI_HOME: home });
   const counts = { minted: 0, signed: 0 };
   const identity = {
-    agentHandle: "pi-example", id: "agent-id",
-    async getSigningKeyStatus() { return { configured: counts.signed > 0 }; },
-    async createSigningKey() { counts.signed++; return { signingKey: "signed-" + counts.signed }; },
+    agentHandle: "pi-example",
+    id: "agent-id",
+    async getSigningKeyStatus() {
+      return { configured: counts.signed > 0 };
+    },
+    async createSigningKey() {
+      counts.signed++;
+      return { signingKey: "signed-" + counts.signed };
+    },
   };
   function clientFor(key) {
     const admin = key === "example-admin";
     return {
-      whoami: async () => ({ authType: "api_key", authSubtype: admin ? "api_key.admin_scoped" : "api_key.agent_scoped.claimed" }),
-      listIdentities: async () => [identity], getIdentity: async () => identity,
-      apiKeys: { create: async () => { counts.minted++; return { apiKey: "example-scoped" }; } },
+      whoami: async () => ({
+        authType: "api_key",
+        authSubtype: admin
+          ? "api_key.admin_scoped"
+          : "api_key.agent_scoped.claimed",
+      }),
+      listIdentities: async () => [identity],
+      getIdentity: async () => identity,
+      apiKeys: {
+        create: async () => {
+          counts.minted++;
+          return { apiKey: "example-scoped" };
+        },
+      },
     };
   }
   return { home, config, counts, clientFor };
 }
 
-test("bootstrap never persists admin keys or rotates existing keys on retry", async t => {
+test("bootstrap never persists admin keys or rotates existing keys on retry", async (t) => {
   const { home, config, counts, clientFor } = fixture(t);
   const options = { identity: "pi-example", key: "example-admin" };
-  for (let i = 0; i < 2; i++) assert.equal((await configure(config, options, undefined, clientFor)).ready, true);
+  for (let i = 0; i < 2; i++)
+    assert.equal(
+      (await configure(config, options, undefined, clientFor)).ready,
+      true,
+    );
   assert.equal(readProfile(home).apiKey, "example-scoped");
   assert.deepEqual(counts, { signed: 1, minted: 1 });
 });
 
-test("missing existing signing key doesn't rotate it without explicit consent", async t => {
+test("missing existing signing key doesn't rotate it without explicit consent", async (t) => {
   const { home, config, counts, clientFor } = fixture(t);
   counts.signed = 1;
   const options = { identity: "pi-example", key: "example-scoped" };
-  assert.equal((await configure(config, options, undefined, clientFor)).ready, false);
+  assert.equal(
+    (await configure(config, options, undefined, clientFor)).ready,
+    false,
+  );
   assert.equal(counts.signed, 1);
   assert.equal(readProfile(home).signingKey, undefined);
-  assert.equal((await configure(config, { ...options, rotate: true }, undefined, clientFor)).ready, true);
+  assert.equal(
+    (
+      await configure(
+        config,
+        { ...options, rotate: true },
+        undefined,
+        clientFor,
+      )
+    ).ready,
+    true,
+  );
   assert.equal(counts.signed, 2);
 });
 
-test("a mismatched agent-scoped key cannot replace a working profile", async t => {
+test("a mismatched agent-scoped key cannot replace a working profile", async (t) => {
   const { home, config, clientFor } = fixture(t);
   saveProfile(home, { identity: "prior" });
-  await assert.rejects(configure(config, { identity: "other", key: "different" }, undefined, clientFor), /does not match/);
+  await assert.rejects(
+    configure(
+      config,
+      { identity: "other", key: "different" },
+      undefined,
+      clientFor,
+    ),
+    /does not match/,
+  );
   assert.deepEqual(readProfile(home), { identity: "prior" });
 });
 
-test("bootstrap cannot restamp a locally saved signing key after server rotation", async t => {
+test("bootstrap cannot restamp a locally saved signing key after server rotation", async (t) => {
   const { createServer } = await import("node:http");
   const { once } = await import("node:events");
   const { execFile } = await import("node:child_process");
@@ -65,29 +107,61 @@ test("bootstrap cannot restamp a locally saved signing key after server rotation
   const api = createServer((req, res) => {
     const route = req.url.replace(/\/$/, "");
     let body;
-    if (route === "/api/whoami") body = { auth_type: "api_key", auth_subtype: "api_key.agent_scoped.claimed" };
+    if (route === "/api/whoami")
+      body = {
+        auth_type: "api_key",
+        auth_subtype: "api_key.agent_scoped.claimed",
+      };
     else if (route === "/api/v1/identities") body = [identity];
     else if (route === "/api/v1/identities/pi-example") body = identity;
-    else if (route === "/api/v1/identities/pi-example/signing-key" && req.method === "GET")
+    else if (
+      route === "/api/v1/identities/pi-example/signing-key" &&
+      req.method === "GET"
+    )
       body = { configured: true, created_at: "2026-01-02T00:00:00Z" };
-    else { res.writeHead(404).end(); return; }
-    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(body));
+    else {
+      res.writeHead(404).end();
+      return;
+    }
+    res
+      .writeHead(200, { "Content-Type": "application/json" })
+      .end(JSON.stringify(body));
   });
   api.listen(0, "127.0.0.1");
   await once(api, "listening");
   t.after(() => api.close());
   const baseUrl = "http://127.0.0.1:" + api.address().port;
-  saveProfile(home, { baseUrl, identity: identity.agent_handle, apiKey: "test-key", signingKey: "stale", signingKeyCreatedAt: "2026-01-01T00:00:00.000Z" });
+  saveProfile(home, {
+    baseUrl,
+    identity: identity.agent_handle,
+    apiKey: "test-key",
+    signingKey: "stale",
+    signingKeyCreatedAt: "2026-01-01T00:00:00.000Z",
+  });
   const script = fileURLToPath(new URL("../bin/inkbox-pi.js", import.meta.url));
   const env = { HOME: home, INKBOX_PI_HOME: home, PATH: process.env.PATH };
-  const bootstrap = () => promisify(execFile)(process.execPath, [script, "bootstrap"], { env });
-  await assert.rejects(bootstrap, error => error.code === 2 && /requires_human/.test(error.stdout));
+  const bootstrap = () =>
+    promisify(execFile)(process.execPath, [script, "bootstrap"], { env });
+  await assert.rejects(
+    bootstrap,
+    (error) => error.code === 2 && /requires_human/.test(error.stdout),
+  );
   assert.equal(readProfile(home).signingKey, undefined);
   mkdirSync(path.join(home, ".inkbox"));
-  const shared = key => writeFileSync(path.join(home, ".inkbox/config"),
-    "base_url = " + baseUrl + "\nidentity = pi-example\nsigning_key = " + key + "\n");
+  const shared = (key) =>
+    writeFileSync(
+      path.join(home, ".inkbox/config"),
+      "base_url = " +
+        baseUrl +
+        "\nidentity = pi-example\nsigning_key = " +
+        key +
+        "\n",
+    );
   shared("stale");
-  await assert.rejects(bootstrap, error => error.code === 2 && /requires_human/.test(error.stdout));
+  await assert.rejects(
+    bootstrap,
+    (error) => error.code === 2 && /requires_human/.test(error.stdout),
+  );
   assert.equal(loadConfig(env).signingKey, "");
   shared("replacement");
   const completed = await bootstrap();
@@ -95,18 +169,57 @@ test("bootstrap cannot restamp a locally saved signing key after server rotation
   assert.equal(readProfile(home).signingKey, "replacement");
 });
 
-test("replacing a revoked key is masked and leaves the saved profile untouched until verified", async t => {
+test("replacing a revoked key is masked and leaves the saved profile untouched until verified", async (t) => {
   const { home, config, clientFor } = fixture(t);
-  const existing = { baseUrl: config.baseUrl, identity: "pi-example", apiKey: "revoked" };
+  const existing = {
+    baseUrl: config.baseUrl,
+    identity: "pi-example",
+    apiKey: "revoked",
+  };
   saveProfile(home, existing);
-  const io = { secret: async () => "wrong", confirm: async () => false, print() {} };
-  const options = {replaceKey:true, projectDir:home};
-  const current = loadConfig({ HOME:home, INKBOX_PI_HOME:home });
-  await assert.rejects(configure(current, options, io, () => ({
-    async whoami() { throw Object.assign(new Error("private"), {statusCode:401}); },
-  })));
+  const io = {
+    secret: async () => "wrong",
+    confirm: async () => false,
+    print() {},
+  };
+  const options = { replaceKey: true, projectDir: home };
+  const current = loadConfig({ HOME: home, INKBOX_PI_HOME: home });
+  await assert.rejects(
+    configure(current, options, io, () => ({
+      async whoami() {
+        throw Object.assign(new Error("private"), { statusCode: 401 });
+      },
+    })),
+  );
   assert.deepEqual(readProfile(home), existing);
   io.secret = async () => "new-scoped";
   assert.equal((await configure(current, options, io, clientFor)).ready, true);
   assert.equal(readProfile(home).apiKey, "new-scoped");
+});
+
+test("readiness rejects a known rotated key without mutating the saved profile", async (t) => {
+  const { config, home } = fixture(t);
+  const saved = {
+    baseUrl: config.baseUrl,
+    identity: "pi-example",
+    signingKey: "original",
+    signingKeyCreatedAt: "2026-01-01T00:00:00.000Z",
+  };
+  saveProfile(home, saved);
+  const owner = {
+    agentHandle: saved.identity,
+    getSigningKeyStatus: async () => ({
+      configured: true,
+      createdAt: "2026-01-02T00:00:00Z",
+    }),
+  };
+  assert.equal(await signingKeyReady({ ...config, ...saved }, owner), false);
+  assert.equal(
+    await signingKeyReady(
+      { ...config, ...saved, signingKey: "replacement" },
+      owner,
+    ),
+    true,
+  );
+  assert.deepEqual(readProfile(home), saved);
 });

@@ -12,14 +12,21 @@ import { join } from "node:path";
 import { digest, parseRoute, beforeTurn, sendReply } from "./channels.js";
 import { parseA2AOutcome } from "../extension/a2a-outcome.js";
 import { externalRoute, reportExternalFailure } from "./external.js";
-import { completionSource, transcriptSource, waitsForTranscript } from "./media.js";
+import {
+  completionSource,
+  transcriptSource,
+  waitsForTranscript,
+} from "./media.js";
 import { boundedReply } from "./reply-limits.js";
 import { failureCategory } from "./diagnostics.js";
 import { problem } from "../cli/errors.js";
 import { deliveryNotification } from "./delivery.js";
 import { hasProjectGrant, runPiTurn } from "./pi.js";
 
-import { openProjectGrants, verifyProjectConversation } from "./project-grants.js";
+import {
+  openProjectGrants,
+  verifyProjectConversation,
+} from "./project-grants.js";
 
 const MAX_WAITING = 256;
 const CONCURRENCY = 4;
@@ -53,7 +60,9 @@ export function createGatewayRuntime(
     owner.exec("BEGIN EXCLUSIVE");
   } catch (error) {
     owner.close();
-    throw problem("Another gateway owns this identity's state. Stop it before starting another.");
+    throw problem(
+      "Another gateway owns this identity's state. Stop it before starting another.",
+    );
   }
   let db, projectGrantFor;
   try {
@@ -124,7 +133,11 @@ export function createGatewayRuntime(
     if (event.event_type === "message.transcription_finished") {
       const source = completionSource(event);
       if (!source) return "ignored";
-      const updated = db.prepare("UPDATE jobs SET due=0 WHERE state='queued' AND id IN (SELECT job FROM media_wait WHERE source=?)").run(source);
+      const updated = db
+        .prepare(
+          "UPDATE jobs SET due=0 WHERE state='queued' AND id IN (SELECT job FROM media_wait WHERE source=?)",
+        )
+        .run(source);
       if (updated.changes) schedule();
       return updated.changes ? "accepted" : "ignored";
     }
@@ -161,8 +174,17 @@ export function createGatewayRuntime(
     const id = digest(identity.id, route.channel, route.thread, route.message);
     route.projectGrant = projectGrantFor(route);
     if (route.projectGrant || route.channel === "a2a")
-      route.thread = digest(route.thread, "project-scope", route.projectGrant, route.assignment,
-        route.channel === "whatsapp" ? identity.whatsappNumber : route.channel === "imessage" ? identity.imessageNumber?.number : null);
+      route.thread = digest(
+        route.thread,
+        "project-scope",
+        route.projectGrant,
+        route.assignment,
+        route.channel === "whatsapp"
+          ? identity.whatsappNumber
+          : route.channel === "imessage"
+            ? identity.imessageNumber?.number
+            : null,
+      );
     if (stateOf.get(id)) {
       db.prepare("INSERT INTO receipts(event,job) VALUES(?,?)").run(
         event.id,
@@ -209,7 +231,10 @@ export function createGatewayRuntime(
       );
       if (waitsForTranscript(route)) {
         const source = transcriptSource(route);
-        if (source) db.prepare("INSERT INTO media_wait(job,source,deadline) VALUES(?,?,?)").run(id, source, Date.now()+60_000);
+        if (source)
+          db.prepare(
+            "INSERT INTO media_wait(job,source,deadline) VALUES(?,?,?)",
+          ).run(id, source, Date.now() + 60_000);
       }
       db.prepare("INSERT INTO receipts(event,job) VALUES(?,?)").run(
         event.id,
@@ -262,20 +287,37 @@ export function createGatewayRuntime(
     // a previous process's saved copy, must authorize delayed work and replies.
     const allowedSenders = config.allowedSenders ?? [];
     const allowedRecipients = config.outbound?.allowedRecipients ?? [];
-    const changedSenders = JSON.stringify(allowedSenders) !== JSON.stringify(route.allowedSenders ?? []);
+    const changedSenders =
+      JSON.stringify(allowedSenders) !==
+      JSON.stringify(route.allowedSenders ?? []);
     route.allowedSenders = allowedSenders;
     route.allowedRecipients = allowedRecipients;
     route.groupReplyMode = config.groupReplyMode ?? "auto";
-    const matches = (list, value) => list.some(entry => entry.trim().toLowerCase() === value.toLowerCase());
-    if ((route.channel === "slack" && !config.slackEnabled) ||
-        (route.sponsored && config.companionResponseMode !== "relaxed") ||
-        (route.channel !== "external" && config.outbound?.approval === "allowlist" && !allowedRecipients.length) ||
-        (!route.sponsored && route.channel !== "slack" && allowedSenders.length && !matches(allowedSenders, route.sender)) ||
-        (route.channel === "a2a" && allowedRecipients.length &&
-          !allowedRecipients.includes(route.callerId) && !matches(allowedRecipients, route.sender)) ||
-        (route.projectGrant && route.channel !== "a2a" && allowedRecipients.length && !allowedRecipients.includes(route.sender)) ||
-        (job.state === "reply" && route.companion?.activation && changedSenders &&
-         !(await beforeTurn(route, client, identity, {hasSession:true})))) {
+    const matches = (list, value) =>
+      list.some((entry) => entry.trim().toLowerCase() === value.toLowerCase());
+    if (
+      (route.channel === "slack" && !config.slackEnabled) ||
+      (route.sponsored && config.companionResponseMode !== "relaxed") ||
+      (route.channel !== "external" &&
+        config.outbound?.approval === "allowlist" &&
+        !allowedRecipients.length) ||
+      (!route.sponsored &&
+        route.channel !== "slack" &&
+        allowedSenders.length &&
+        !matches(allowedSenders, route.sender)) ||
+      (route.channel === "a2a" &&
+        allowedRecipients.length &&
+        !allowedRecipients.includes(route.callerId) &&
+        !matches(allowedRecipients, route.sender)) ||
+      (route.projectGrant &&
+        route.channel !== "a2a" &&
+        allowedRecipients.length &&
+        !allowedRecipients.includes(route.sender)) ||
+      (job.state === "reply" &&
+        route.companion?.activation &&
+        changedSenders &&
+        !(await beforeTurn(route, client, identity, { hasSession: true })))
+    ) {
       mark.run("ignored", job.id);
       return;
     }
@@ -300,16 +342,25 @@ export function createGatewayRuntime(
         return;
       }
       if (signal.aborted) return;
-      const mediaWait = db.prepare("SELECT deadline FROM media_wait WHERE job=?").get(job.id);
+      const mediaWait = db
+        .prepare("SELECT deadline FROM media_wait WHERE job=?")
+        .get(job.id);
       if (mediaWait) {
         if (waitsForTranscript(route) && Date.now() < mediaWait.deadline) {
-          db.prepare("UPDATE jobs SET due=? WHERE id=?").run(Math.min(mediaWait.deadline,Date.now()+5_000),job.id);
+          db.prepare("UPDATE jobs SET due=? WHERE id=?").run(
+            Math.min(mediaWait.deadline, Date.now() + 5_000),
+            job.id,
+          );
           return;
         }
         db.prepare("DELETE FROM media_wait WHERE job=?").run(job.id);
       }
-      if (job.command && (route.noControls ||
-          (route.projectGrant && job.command !== route.text.trim().toLowerCase()))) {
+      if (
+        job.command &&
+        (route.noControls ||
+          (route.projectGrant &&
+            job.command !== route.text.trim().toLowerCase()))
+      ) {
         mark.run("ignored", job.id);
         return;
       }
@@ -358,9 +409,13 @@ export function createGatewayRuntime(
       );
       return;
     }
-    if (route.projectGrant &&
-        (projectGrantFor(route) !== route.projectGrant ||
-          (reply !== sendReply && route.channel !== "a2a" && !(await verifyProjectConversation(route, identity))))) {
+    if (
+      route.projectGrant &&
+      (projectGrantFor(route) !== route.projectGrant ||
+        (reply !== sendReply &&
+          route.channel !== "a2a" &&
+          !(await verifyProjectConversation(route, identity))))
+    ) {
       mark.run("ignored", job.id);
       return;
     }
@@ -371,11 +426,21 @@ export function createGatewayRuntime(
       if (route.channel === "a2a")
         db.prepare("UPDATE jobs SET state='sending' WHERE id=?").run(job.id);
       try {
-        result = await reply(route, boundedReply(route.channel, answer), job.id, client, identity);
+        result = await reply(
+          route,
+          boundedReply(route.channel, answer),
+          job.id,
+          client,
+          identity,
+        );
       } catch (error) {
         if (route.channel !== "a2a") throw error;
         db.prepare("UPDATE jobs SET state='uncertain' WHERE id=?").run(job.id);
-        recordFailure(job.id, job.attempts + 1, failureCategory(error, "reply-delivery"));
+        recordFailure(
+          job.id,
+          job.attempts + 1,
+          failureCategory(error, "reply-delivery"),
+        );
         return;
       }
     }
@@ -398,7 +463,9 @@ export function createGatewayRuntime(
   }
 
   function recordFailure(id, attempt, category) {
-    db.prepare("INSERT OR REPLACE INTO diagnostics(job, attempt, category) VALUES(?,?,?)").run(id,attempt,category);
+    db.prepare(
+      "INSERT OR REPLACE INTO diagnostics(job, attempt, category) VALUES(?,?,?)",
+    ).run(id, attempt, category);
     logger.error("Inkbox Pi job failed:", id, "attempt", attempt, category);
   }
 
@@ -407,7 +474,10 @@ export function createGatewayRuntime(
     const { attempts, state } = db
       .prepare("SELECT attempts,state FROM jobs WHERE id=?")
       .get(job.id);
-    const category = failureCategory(error, state === "reply" ? "reply-delivery" : "event-processing");
+    const category = failureCategory(
+      error,
+      state === "reply" ? "reply-delivery" : "event-processing",
+    );
     recordFailure(job.id, attempts + 1, category);
     if (state === "project") {
       db.prepare("UPDATE jobs SET state='uncertain' WHERE id=?").run(job.id);
@@ -415,7 +485,11 @@ export function createGatewayRuntime(
       return;
     }
     const status = error?.statusCode;
-    const permanent = Number.isInteger(status) && status >= 400 && status < 500 && ![408,409,425,429].includes(status);
+    const permanent =
+      Number.isInteger(status) &&
+      status >= 400 &&
+      status < 500 &&
+      ![408, 409, 425, 429].includes(status);
     if (!permanent && attempts < RETRIES.length) {
       db.prepare("UPDATE jobs SET attempts=attempts+1,due=? WHERE id=?").run(
         Date.now() + RETRIES[attempts],
@@ -480,9 +554,12 @@ export function createGatewayRuntime(
           continue;
         // All project grants in this runtime name the same owner-selected files.
         // Serialize just their model turns, not ordinary conversations or deliveries.
-        const projectTurn = job.state === "queued" && !job.command &&
+        const projectTurn =
+          job.state === "queued" &&
+          !job.command &&
           Boolean(JSON.parse(job.payload).projectGrant);
-        if (projectTurn && workers.some((worker) => worker.projectTurn)) continue;
+        if (projectTurn && workers.some((worker) => worker.projectTurn))
+          continue;
         const controller = new AbortController();
         const promise = processJob(job, controller.signal)
           .catch((error) => retry(job, controller.signal, error))
@@ -525,7 +602,13 @@ export function createGatewayRuntime(
       );
     },
     lastFailure(eventId) {
-      return db.prepare("SELECT category,attempt FROM diagnostics JOIN receipts ON diagnostics.job=receipts.job WHERE event=?").get(eventId) ?? null;
+      return (
+        db
+          .prepare(
+            "SELECT category,attempt FROM diagnostics JOIN receipts ON diagnostics.job=receipts.job WHERE event=?",
+          )
+          .get(eventId) ?? null
+      );
     },
     eventResult(eventId) {
       return (

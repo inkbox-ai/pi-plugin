@@ -483,17 +483,31 @@ test(
   },
 );
 
-test("narrowing the sender policy stops work that was queued before restart", async t => {
+test("narrowing the sender policy stops work that was queued before restart", async (t) => {
   const home = await mkdtemp(join(tmpdir(), "pi-revoke-sender-"));
   let runtime;
-  t.after(async () => { await runtime?.close(); await rm(home, {recursive:true, force:true}); });
-  const config = {home, baseUrl:"https://example.com"};
-  const deps = {identity, client:{}, turn:() => assert.fail("revoked sender ran Pi")};
+  t.after(async () => {
+    await runtime?.close();
+    await rm(home, { recursive: true, force: true });
+  });
+  const config = { home, baseUrl: "https://example.com" };
+  const deps = {
+    identity,
+    client: {},
+    turn: () => assert.fail("revoked sender ran Pi"),
+  };
   runtime = createGatewayRuntime(config, deps);
   assert.equal(runtime.acceptVerified(sms("pending")), "accepted");
   await runtime.close();
-  runtime = createGatewayRuntime({...config, allowedSenders:["+12025550999"]}, deps);
-  for (let i = 0; i < 100 && runtime.eventState("evt-pending") !== "ignored"; i++)
-    await new Promise(resolve => setTimeout(resolve, 10));
+  runtime = createGatewayRuntime(
+    { ...config, allowedSenders: ["+12025550999"] },
+    deps,
+  );
+  for (
+    let i = 0;
+    i < 100 && runtime.eventState("evt-pending") !== "ignored";
+    i++
+  )
+    await new Promise((resolve) => setTimeout(resolve, 10));
   assert.equal(runtime.eventState("evt-pending"), "ignored");
 });

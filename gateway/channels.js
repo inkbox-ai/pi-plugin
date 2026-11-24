@@ -1,5 +1,10 @@
 import { verifyProjectConversation } from "./project-grants.js";
-import { attachments, describeMedia, refreshMedia, waitsForTranscript } from "./media.js";
+import {
+  attachments,
+  describeMedia,
+  refreshMedia,
+  waitsForTranscript,
+} from "./media.js";
 import { parseA2AOutcome } from "../extension/a2a-outcome.js";
 import { createHash } from "node:crypto";
 import {
@@ -55,7 +60,9 @@ export function parseRoute(event, identity, allowedSenders = [], options = {}) {
     actor,
     contextId,
     recipients,
-    control, media = [], caption;
+    control,
+    media = [],
+    caption;
   if (
     event.companion != null &&
     !["ordinary", "initialization", "live"].includes(event.companion.phase)
@@ -114,9 +121,7 @@ export function parseRoute(event, identity, allowedSenders = [], options = {}) {
     message = data.message_ts;
     caption = clean(data.event?.text);
     media = attachments(data.event?.files);
-    text = [caption, media.length && "[Attachment]"]
-      .filter(Boolean)
-      .join("\n");
+    text = [caption, media.length && "[Attachment]"].filter(Boolean).join("\n");
     if (
       !addressed &&
       !event.companion &&
@@ -201,7 +206,9 @@ export function parseRoute(event, identity, allowedSenders = [], options = {}) {
           clean(record.sender_phone_number) ||
           clean(record.remote_phone_number);
         conversation = clean(record.conversation_id);
-        text = [record.text, media.length && "[Attachment]"].filter(Boolean).join("\n");
+        text = [record.text, media.length && "[Attachment]"]
+          .filter(Boolean)
+          .join("\n");
         break;
       case "imessage.received":
         if (!identity.imessageEnabled) return null;
@@ -210,7 +217,9 @@ export function parseRoute(event, identity, allowedSenders = [], options = {}) {
         conversation = clean(record.conversation_id);
         subthread =
           clean(record.thread_root_message_id) || clean(record.thread_id);
-        text = [record.content, media.length && "[Attachment]"].filter(Boolean).join("\n");
+        text = [record.content, media.length && "[Attachment]"]
+          .filter(Boolean)
+          .join("\n");
         break;
       case "whatsapp.received":
         if (record.agent_identity_id !== identity.id) return null;
@@ -219,7 +228,9 @@ export function parseRoute(event, identity, allowedSenders = [], options = {}) {
         conversation = clean(record.conversation_id);
         subthread =
           clean(record.thread_root_message_id) || clean(record.thread_id);
-        text = [record.content, media.length && "[Attachment]"].filter(Boolean).join("\n");
+        text = [record.content, media.length && "[Attachment]"]
+          .filter(Boolean)
+          .join("\n");
         break;
       default:
         return null;
@@ -266,7 +277,9 @@ export function parseRoute(event, identity, allowedSenders = [], options = {}) {
   )
     return null;
   const route = {
-    media, caption, callerId,
+    media,
+    caption,
+    callerId,
     contextId,
     channel,
     sender,
@@ -284,7 +297,7 @@ export function parseRoute(event, identity, allowedSenders = [], options = {}) {
     control,
     sponsored,
     directAccess: record?.sender_access === "direct",
-    assignment: channel === "imessage" ? record?.assignment_id ?? null : null,
+    assignment: channel === "imessage" ? (record?.assignment_id ?? null) : null,
     allowedSenders,
     groupReplyMode: options.groupReplyMode ?? "auto",
     recipients,
@@ -314,10 +327,7 @@ export function parseRoute(event, identity, allowedSenders = [], options = {}) {
     options.groupReplyMode === "mention" &&
     !addressed &&
     !record?.agent_mentioned &&
-    !mentionsAgent(
-      caption ?? "",
-      identity.agentHandle,
-    )
+    !mentionsAgent(caption ?? "", identity.agentHandle)
   )
     return null;
   route.thread = route.companion
@@ -428,17 +438,16 @@ async function taskSource(route, identity) {
     task.contextId !== route.contextId ||
     (task.target != null && task.target.identityId !== identity.id) ||
     task.caller?.identityId !== route.callerId ||
-    normalized(task.caller?.handle || task.caller?.identityId) !== normalized(route.sender) ||
+    normalized(task.caller?.handle || task.caller?.identityId) !==
+      normalized(route.sender) ||
     !["submitted", "working"].includes(task.state)
   )
     return false;
-  const callerRoles = new Set(["caller","role_caller","user","role_user"]);
-  const latest = task.messages?.findLast((item) => callerRoles.has(normalized(item.role)));
-  if (
-    !latest ||
-    latest.messageId !== route.message
-  )
-    return false;
+  const callerRoles = new Set(["caller", "role_caller", "user", "role_user"]);
+  const latest = task.messages?.findLast((item) =>
+    callerRoles.has(normalized(item.role)),
+  );
+  if (!latest || latest.messageId !== route.message) return false;
   route.text = latest.parts
     .map((part) => clean(part.text))
     .filter(Boolean)
@@ -527,12 +536,22 @@ async function messagingSource(route, identity) {
       .filter(Boolean)
       .join("\n");
     const recipients = source.replyAllRecipients;
-    if (!Array.isArray(recipients?.to) || !Array.isArray(recipients?.cc)) return false;
-    const audience = [...new Set([...recipients.to, ...recipients.cc].map(normalized))].sort();
-    if (!audience.length || (route.replyRecipients &&
-        JSON.stringify(route.replyRecipients) !== JSON.stringify(audience))) return false;
+    if (!Array.isArray(recipients?.to) || !Array.isArray(recipients?.cc))
+      return false;
+    const audience = [
+      ...new Set([...recipients.to, ...recipients.cc].map(normalized)),
+    ].sort();
+    if (
+      !audience.length ||
+      (route.replyRecipients &&
+        JSON.stringify(route.replyRecipients) !== JSON.stringify(audience))
+    )
+      return false;
     route.replyRecipients = audience;
-    route.group ||= audience.filter(address => address !== normalized(identity.mailbox.emailAddress)).length > 1;
+    route.group ||=
+      audience.filter(
+        (address) => address !== normalized(identity.mailbox.emailAddress),
+      ).length > 1;
     route.noControls ||= route.group;
     return (
       Boolean(route.text) &&
@@ -586,11 +605,17 @@ async function messagingSource(route, identity) {
     return true;
   }
   if (route.channel === "sms") {
-    if (!await smsSource(route, identity)) return false;
+    if (!(await smsSource(route, identity))) return false;
     if (waitsForTranscript(route)) {
       const source = await identity.getText(route.message);
-      if (source.id !== route.message || source.direction !== "inbound" || source.conversationId !== route.conversation ||
-        source.localPhoneNumber !== identity.phoneNumber?.number || (source.senderPhoneNumber || source.remotePhoneNumber) !== route.sender) return false;
+      if (
+        source.id !== route.message ||
+        source.direction !== "inbound" ||
+        source.conversationId !== route.conversation ||
+        source.localPhoneNumber !== identity.phoneNumber?.number ||
+        (source.senderPhoneNumber || source.remotePhoneNumber) !== route.sender
+      )
+        return false;
       refreshMedia(route, source.media);
     }
     return true;
@@ -610,7 +635,9 @@ export async function beforeTurn(
     if (!(await slackSource(route, client, identity))) return false;
   } else if (!(await messagingSource(route, identity))) return false;
   if (route.media?.length && !route.projectGrant) {
-    route.text = [route.caption, describeMedia(route.media)].filter(Boolean).join("\n");
+    route.text = [route.caption, describeMedia(route.media)]
+      .filter(Boolean)
+      .join("\n");
   }
   return prepareCompanion(route, client, identity, hasSession);
 }
@@ -661,7 +688,7 @@ export async function sendReply(route, text, idempotencyKey, client, identity) {
       return identity.sendIMessage({
         ...(route.projectGrant ? { plainReplyFallback: false } : {}),
         conversationId: route.conversation,
-        ...(route.subthread ? {replyToMessageId: route.message} : {}),
+        ...(route.subthread ? { replyToMessageId: route.message } : {}),
         text,
         idempotencyKey,
       });
@@ -693,7 +720,12 @@ export async function sendReply(route, text, idempotencyKey, client, identity) {
   }
 }
 
-export async function subscribe(client, identity, url, { slackEnabled = false } = {}) {
+export async function subscribe(
+  client,
+  identity,
+  url,
+  { slackEnabled = false } = {},
+) {
   const owners = [];
   if (identity.mailbox)
     owners.push([
@@ -705,7 +737,8 @@ export async function subscribe(client, identity, url, { slackEnabled = false } 
       { phoneNumberId: identity.phoneNumber.id },
       ["text.received", "text.delivery_failed", "text.delivery_unconfirmed"],
     ]);
-  const identityEvents = slackEnabled ? [...taskEvents, ...slackEvents] : [...taskEvents];
+  const identityEvents = ["message.transcription_finished", ...taskEvents];
+  if (slackEnabled) identityEvents.push(...slackEvents);
   if (identity.imessageEnabled)
     identityEvents.push("imessage.received", "imessage.delivery_failed");
   if (identity.whatsappEnabled || identity.whatsappNumber)

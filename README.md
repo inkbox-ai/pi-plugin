@@ -93,4 +93,4 @@ The initial package version matches the published Inkbox SDK, **0.7.42**. The ex
     ./publish.sh          # verify the SDK, pack the release, and dry-run
     ./publish.sh --prod   # publish the verified package to public npm
 
-Use an npm identity with publish access to the `@inkbox` scope. A retry accepts an existing version only if its registry integrity matches the local tarball. The `pi-package` keyword makes the released npm package eligible for the [Pi catalog](https://pi.dev/packages); there is no separate extension upload.
+Run the release command from the merged repository checkout. Use an npm identity with publish access to the `@inkbox` scope. A retry accepts an existing version only if its registry integrity matches the local tarball. The `pi-package` keyword makes the released npm package eligible for the [Pi catalog](https://pi.dev/packages); there is no separate extension upload.

@@ -58,7 +58,10 @@ export function runPiTurn(config, route, sessionFile, signal) {
     function stop() {
       child.kill("SIGKILL");
     }
-    const timer = setTimeout(() => { failure = hostProblem("pi-timeout"); stop(); }, 300_000);
+    const timer = setTimeout(() => {
+      failure = hostProblem("pi-timeout");
+      stop();
+    }, 300_000);
     signal.addEventListener("abort", stop, { once: true });
     if (signal.aborted) stop();
     child.once("error", () => reject(hostProblem("pi-binary")));
@@ -101,15 +104,32 @@ export function runPiTurn(config, route, sessionFile, signal) {
       try {
         readLine(buffer + decoder.end());
         if (failure) throw failure;
-        if (signal.aborted || finalMessage?.stopReason === "aborted" || finalMessage?.stopReason === "length")
+        if (
+          signal.aborted ||
+          finalMessage?.stopReason === "aborted" ||
+          finalMessage?.stopReason === "length"
+        )
           throw hostProblem("pi-incomplete");
         if (finalMessage?.stopReason === "error") {
-          const detail = typeof finalMessage.errorMessage === "string" ? finalMessage.errorMessage : "";
-          if (/unauthori[sz]ed|authentication|invalid.api.key|no api key|\b401\b/i.test(detail)) throw hostProblem("pi-auth");
+          const detail =
+            typeof finalMessage.errorMessage === "string"
+              ? finalMessage.errorMessage
+              : "";
+          if (
+            /unauthori[sz]ed|authentication|invalid.api.key|no api key|\b401\b/i.test(
+              detail,
+            )
+          )
+            throw hostProblem("pi-auth");
           throw hostProblem("pi-turn");
         }
-        if (code !== 0 || finalMessage?.stopReason !== "stop") throw hostProblem("pi-turn");
-        const answer = finalMessage.content.filter((block) => block.type === "text").map((block) => block.text).join("").trim();
+        if (code !== 0 || finalMessage?.stopReason !== "stop")
+          throw hostProblem("pi-turn");
+        const answer = finalMessage.content
+          .filter((block) => block.type === "text")
+          .map((block) => block.text)
+          .join("")
+          .trim();
         if (!answer) throw hostProblem("pi-incomplete");
         resolve(answer);
       } catch (error) {
