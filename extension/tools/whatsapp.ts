@@ -4,6 +4,7 @@ import { z } from "zod";
 import { runTool } from "../errors.ts";
 import { formatJson } from "../format.ts";
 import { localMediaPath, readFileWithCap } from "../media.ts";
+import { idempotencyKey, requestKey } from "../message-key.ts";
 import { approveOutbound } from "../permissions.ts";
 import type { RegisteredTool, ToolDeps } from "./types.ts";
 
@@ -191,7 +192,7 @@ export function whatsappTools(deps: ToolDeps): RegisteredTool[] {
         conversationId: z.string().optional(),
         text: z.string().optional(),
         mediaId: z.string().optional(),
-        idempotencyKey: z.string().optional(),
+        idempotencyKey,
       },
       async (args, ctx) => {
         if (
@@ -215,7 +216,7 @@ export function whatsappTools(deps: ToolDeps): RegisteredTool[] {
         }
         ctx.abort?.throwIfAborted();
         const { mediaId, ...target } = args;
-        const key = args.idempotencyKey ?? ctx.callId;
+        const key = requestKey(ctx, args.idempotencyKey);
         const message = await identity.sendWhatsApp({
           ...target,
           ...(mediaId ? { mediaIds: [mediaId] } : {}),

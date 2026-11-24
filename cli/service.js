@@ -1,9 +1,13 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  accessSync,
+  constants,
   existsSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
+  statSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -16,6 +20,7 @@ import { loadConfig, saveProfile, readProfile } from "./config.js";
 
 import { modelEnvironment } from "./model-env.js";
 
+const nodeExecutable = realpathSync(process.execPath);
 const packageVersion = JSON.parse(
   readFileSync(new URL("../package.json", import.meta.url), "utf8"),
 ).version;
@@ -86,7 +91,7 @@ function plist(label, home) {
     "<key>Label</key><string>" +
     xml(label) +
     "</string><key>ProgramArguments</key><array>" +
-    [process.execPath, entry, "service-run", home]
+    [nodeExecutable, entry, "service-run", home]
       .map((v) => "<string>" + xml(v) + "</string>")
       .join("") +
     "</array><key>RunAtLoad</key><true/><key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>" +
@@ -167,6 +172,29 @@ export function serviceStatus(config, fingerprint) {
   };
 }
 
+// Version managers may expose Pi through a shell-specific symlink that is
+// removed at logout. Persist its actual executable for the login service.
+export function servicePiBin(binary, searchPath = process.env.PATH ?? "") {
+  const candidates = binary.includes(path.sep)
+    ? [path.resolve(binary)]
+    : searchPath
+        .split(path.delimiter)
+        .filter(Boolean)
+        .map((dir) => path.resolve(dir, binary));
+  for (const candidate of candidates) {
+    try {
+      const resolved = realpathSync(candidate);
+      accessSync(resolved, constants.X_OK);
+      if (statSync(resolved).isFile()) return resolved;
+    } catch (error) {
+      if (!["ENOENT", "ENOTDIR", "EACCES"].includes(error.code)) throw error;
+    }
+  }
+  throw problem(
+    "Cannot find an executable Pi for this service. Check INKBOX_PI_BIN and PATH.",
+  );
+}
+
 // Copy only settings required by this profile, not an arbitrary caller's
 // environment. Model credentials should be configured with Pi's own login.
 function saveServiceSettings(config) {
@@ -179,6 +207,7 @@ function saveServiceSettings(config) {
   );
   // A service with no saved profile still needs a stable working directory.
   overrides.projectDirectory = config.projectDirectory;
+  overrides.piBin = servicePiBin(config.piBin);
   const serviceDir = path.join(home, "service");
   const previous = readProfile(serviceDir);
   const sameOwner =
@@ -195,18 +224,14 @@ function saveServiceSettings(config) {
     overrides,
     profileIdentity: baseline.identity,
     profileOrigin: baseline.baseUrl,
-    path: process.env.PATH,
+    path: [path.dirname(nodeExecutable), process.env.PATH]
+      .filter(Boolean)
+      .join(path.delimiter),
     agentDir: process.env.PI_CODING_AGENT_DIR,
   };
   const fingerprint = createHash("sha256")
     .update(
-      JSON.stringify([
-        config,
-        settings,
-        process.execPath,
-        entry,
-        packageVersion,
-      ]),
+      JSON.stringify([config, settings, nodeExecutable, entry, packageVersion]),
     )
     .digest("hex");
   saveProfile(serviceDir, { ...settings, fingerprint });
@@ -230,7 +255,7 @@ export async function service(action, config) {
   if (process.platform === "linux") {
     const systemctl = (...args) => invoke("systemctl", ["--user", ...args]);
     if (starting) {
-      write(files.unit, unitFile(process.execPath, entry, config.home));
+      write(files.unit, unitFile(nodeExecutable, entry, config.home));
       systemctl("daemon-reload");
       if (action === "install") systemctl("enable", files.name);
       systemctl(action === "start" ? "start" : "restart", files.name);

@@ -126,13 +126,21 @@ test("WhatsApp passes the owned attachment and idempotency key through to the SD
     },
   });
   const send = tools.find((t) => t.name === "inkbox_send_whatsapp");
-  await send.definition.execute(
-    { to: "+12025550123", mediaId: "media-1" },
-    { callId: "pi-turn-1" },
+  const sendFrom = (sessionID, idempotencyKey?) => send.definition.execute(
+    { to: "+12025550123", mediaId: "media-1", idempotencyKey },
+    { sessionID, callId: "pi-turn-1" },
   );
+  await sendFrom("session-A");
+  const originalKey = sent.idempotencyKey;
+  assert.match(originalKey, /^pi:[0-9a-f]{64}$/);
+  await sendFrom("session-A");
   assert.deepEqual(sent, {
     to: "+12025550123",
     mediaIds: ["media-1"],
-    idempotencyKey: "pi-turn-1",
+    idempotencyKey: originalKey,
   });
+  await sendFrom("session-B");
+  assert.notEqual(sent.idempotencyKey, originalKey);
+  await sendFrom("session-B", originalKey);
+  assert.equal(sent.idempotencyKey, originalKey);
 });
