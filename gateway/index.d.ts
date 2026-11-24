@@ -11,10 +11,15 @@ export interface GatewayConfig {
   groupReplyMode?: "auto" | "mention";
   companionResponseMode?: "safe" | "relaxed";
   allowedSenders?: string[];
+  tools?: { enable?: string[]; disable?: string[] };
   outbound?: { approval?: "ask" | "allowlist" | "auto"; allowedRecipients?: string[] };
   trustedAgentIds?: string[];
   trustedConversations?: string[];
   projectFiles?: string[];
+  /** Allow the configured direct conversations to inspect this workspace. */
+  projectReadWorkspace?: boolean;
+  /** Owner-selected test executable and arguments; never a chat-supplied shell command. */
+  projectTestCommand?: string[];
 }
 
 export interface ListenerConfig extends GatewayConfig {

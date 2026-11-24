@@ -1,17 +1,58 @@
 import { createHash, randomUUID } from "node:crypto";
 
-const directGrant = /^(imessage|whatsapp):[^:\s]+:\+[1-9]\d{6,14}$/;
+import { archivedSlackSource, findTextConversation } from "./source-lookups.js";
+
+const directGrant =
+  /^(?:(?:imessage|whatsapp|sms):[^:\s]+:\+[1-9]\d{6,14}|email:[^:\s]+:[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+|slack:[^:\s]+:D[A-Z0-9]+:[A-Z0-9]+:[A-Z0-9]+)$/;
+
+export function validateProjectConfig(config) {
+  if (
+    !Array.isArray(config.trustedConversations ?? []) ||
+    (config.trustedConversations ?? []).some(
+      (key) => typeof key !== "string" || !directGrant.test(key),
+    )
+  )
+    throw new Error(
+      "Invalid trustedConversations binding. Use channel:conversation:peer, or slack:connection:DM:team:user.",
+    );
+  if (
+    config.projectReadWorkspace !== undefined &&
+    typeof config.projectReadWorkspace !== "boolean"
+  )
+    throw new Error("projectReadWorkspace must be a boolean.");
+  const argv = config.projectTestCommand;
+  if (
+    argv !== undefined &&
+    (!Array.isArray(argv) ||
+      argv.some((v) => typeof v !== "string" || v.includes("\0")) ||
+      (argv.length > 0 && !argv[0].trim()))
+  )
+    throw new Error(
+      "projectTestCommand must be a JSON argument array with a non-empty executable.",
+    );
+}
+
+export function projectAudience(route) {
+  return route.channel === "slack"
+    ? "slack:" + route.connection + ":" + route.conversation
+    : route.sender;
+}
 
 export function directBinding(route) {
   if (route.group || route.companion || route.sponsored || !route.directAccess)
     return null;
-  const key = [route.channel, route.conversation, route.sender].join(":");
+  const fields =
+    route.channel === "slack"
+      ? [route.channel, route.connection, route.conversation, route.sender]
+      : [route.channel, route.conversation, route.sender];
+  const key = fields.join(":");
   return directGrant.test(key) ? key : null;
 }
 
 // A signing-approved gateway receipt is not a file grant. Keep a separate
 // transcript generation for each owner-selected binding and exact file list.
 export function openProjectGrants(db, config) {
+  validateProjectConfig(config);
   const revisions = new Map();
   db.exec(
     "CREATE TABLE IF NOT EXISTS project_grants (scope TEXT PRIMARY KEY, revision TEXT NOT NULL)",
@@ -23,12 +64,26 @@ export function openProjectGrants(db, config) {
           key,
           config.projectDirectory,
           [...(config.projectFiles ?? [])].sort(),
+          ...(!key.startsWith("a2a:") &&
+          (config.projectReadWorkspace || config.projectTestCommand?.length)
+            ? [
+                Boolean(config.projectReadWorkspace),
+                config.projectTestCommand ?? [],
+              ]
+            : []),
         ]),
       )
       .digest("hex");
-  if (config.projectFiles?.length) {
+  if (
+    config.projectFiles?.length ||
+    config.projectReadWorkspace ||
+    config.projectTestCommand?.length
+  ) {
     const keys = [
-      ...(config.trustedAgentIds ?? []).map((id) => "a2a:" + id),
+      ...(config.projectFiles?.length
+        ? (config.trustedAgentIds ?? [])
+        : []
+      ).map((id) => "a2a:" + id),
       ...(config.trustedConversations ?? []).filter((key) =>
         directGrant.test(key),
       ),
@@ -86,8 +141,18 @@ export function samePhoneThread(route, source) {
 
 // Inkbox's identity-scoped resource reads are authoritative for both halves of
 // the binding. Never run a project turn using a webhook's copy of the prompt.
-export async function verifyProjectConversation(route, identity) {
-  if (!directBinding(route)) return false;
+export async function verifyProjectConversation(route, identity, client) {
+  if (
+    !directBinding(route) ||
+    (route.allowedRecipients?.length &&
+      !route.allowedRecipients.some(
+        (v) => v.trim().toLowerCase() === projectAudience(route).toLowerCase(),
+      ))
+  )
+    return false;
+  if (route.channel === "sms") return verifyText(route, identity);
+  if (route.channel === "email") return verifyMail(route, identity);
+  if (route.channel === "slack") return verifySlack(route, identity, client);
   const whatsapp = route.channel === "whatsapp";
   const source = whatsapp
     ? await identity.getWhatsAppMessage(route.message)
@@ -148,11 +213,188 @@ export async function verifyProjectConversation(route, identity) {
       : !ownedNumber)
   )
     return false;
+  route.text = source.content;
+  return true;
+}
+
+async function verifyText(route, identity) {
+  if (!identity.phoneNumber?.number) return false;
+  const source = await identity.getText(route.message);
   if (
-    route.allowedRecipients?.length &&
-    !route.allowedRecipients.includes(route.sender)
+    source?.id !== route.message ||
+    source.localPhoneNumber !== identity.phoneNumber.number ||
+    source.conversationId !== route.conversation ||
+    source.direction !== "inbound" ||
+    source.isBlocked !== false ||
+    source.origin !== "user_initiated" ||
+    source.remotePhoneNumber !== route.sender ||
+    (source.senderPhoneNumber != null &&
+      source.senderPhoneNumber !== route.sender) ||
+    typeof source.text !== "string" ||
+    !source.text.trim()
   )
     return false;
-  route.text = source.content;
+  const dest = await findTextConversation(route, identity);
+  if (
+    dest?.isGroup !== false ||
+    dest.remotePhoneNumber !== route.sender ||
+    !Array.isArray(dest.participants) ||
+    dest.participants.length !== 1 ||
+    dest.participants[0] !== route.sender
+  )
+    return false;
+  route.text = source.text;
+  route.noControls ||= Boolean(source.media?.length);
+  return true;
+}
+
+const address = (value) =>
+  typeof value === "string" ? value.toLowerCase() : "";
+const oneAddress = (list, expected) =>
+  Array.isArray(list) && list.length === 1 && address(list[0]) === expected;
+const empty = (list) =>
+  list === null || (Array.isArray(list) && list.length === 0);
+
+// Commands must begin in the author's own text. Discard a conventional mail
+// quote/footer only after that text, never search quoted history for a command.
+export function mailControl(body) {
+  if (typeof body !== "string") return "";
+  const lines = body.trimStart().replace(/\r\n/g, "\n").split("\n");
+  if (
+    !/^\/(?:approve|deny|verify|answer|stop|cancel|clear|new|status)(?:\s|$)/i.test(
+      lines[0],
+    )
+  )
+    return body.trim();
+  const tail = lines.findIndex(
+    (line, i) =>
+      i > 0 &&
+      (line === "-- " ||
+        (/^>/.test(line) &&
+          lines.slice(i).every((s) => !s.trim() || /^>/.test(s))) ||
+        (/^On .+ wrote:$/i.test(line) &&
+          lines.slice(i + 1).some((s) => /^>/.test(s)) &&
+          lines.slice(i + 1).every((s) => !s.trim() || /^>/.test(s))) ||
+        (line === "-----Original Message-----" &&
+          /^From:\s+/i.test(lines[i + 1] ?? ""))),
+  );
+  return (tail === -1 ? lines : lines.slice(0, tail)).join("\n").trim();
+}
+
+async function verifyMail(route, identity) {
+  const own = address(identity.mailbox?.emailAddress);
+  if (!own || own === route.sender) return false;
+  const source = await identity.getMessage(route.message);
+  const directEnvelope = (message) => {
+    const inbound = message.direction === "inbound";
+    return (
+      (inbound || message.direction === "outbound") &&
+      message.mailboxId === identity.mailbox.id &&
+      message.threadId === route.conversation &&
+      address(message.fromAddress) === (inbound ? route.sender : own) &&
+      oneAddress(message.toAddresses, inbound ? own : route.sender) &&
+      empty(message.ccAddresses)
+    );
+  };
+  if (
+    !source ||
+    source.id !== route.message ||
+    source.direction !== "inbound" ||
+    source.status !== "received" ||
+    source.importJobId != null ||
+    !directEnvelope(source) ||
+    !empty(source.bccAddresses) ||
+    !oneAddress(source.replyAllRecipients?.to, route.sender) ||
+    !empty(source.replyAllRecipients?.cc) ||
+    typeof source.messageId !== "string" ||
+    !source.messageId ||
+    /[\r\n\0]/.test(source.messageId) ||
+    typeof source.bodyText !== "string" ||
+    !source.bodyText.trim()
+  )
+    return false;
+  const thread = await identity.getThread(route.conversation);
+  if (
+    thread?.id !== route.conversation ||
+    thread.mailboxId !== identity.mailbox.id ||
+    !["inbox", "archive"].includes(thread.folder) ||
+    !Array.isArray(thread.messages) ||
+    thread.messageCount !== thread.messages.length ||
+    !thread.messages.every(directEnvelope) ||
+    !thread.messages.some((m) => m.id === route.message)
+  )
+    return false;
+  route.text = [source.subject, source.bodyText].filter(Boolean).join("\n");
+  route.control = mailControl(source.bodyText);
+  route.mailParent = source.messageId;
+  route.mailSubject = (source.subject ?? "")
+    .replace(/[\x00-\x1f\x7f]/g, " ")
+    .slice(0, 240);
+  route.noControls ||= Boolean(source.hasAttachments);
+  return true;
+}
+
+async function verifySlack(route, identity, client) {
+  const { connections } = await client.slack.listConnections(identity.id);
+  const matches = connections.filter(
+    (c) =>
+      c.id === route.connection &&
+      c.identityId === identity.id &&
+      c.workspaceId === route.workspace &&
+      c.status === "connected" &&
+      Number.isSafeInteger(c.generation) &&
+      c.generation > 0 &&
+      (route.generation == null || c.generation === route.generation),
+  );
+  if (
+    matches.length !== 1 ||
+    !matches[0].botUserId ||
+    matches[0].botUserId === route.actor
+  )
+    return false;
+  route.generation = matches[0].generation;
+  const profile = await client.slack.getUser(route.connection, route.actor);
+  if (
+    profile?.id !== route.actor ||
+    profile.is_bot !== false ||
+    profile.deleted === true ||
+    profile.is_app_user === true ||
+    !profile.team_id ||
+    profile.team_id + ":" + route.actor !== route.sender
+  )
+    return false;
+  if (
+    route.allowedSenders?.length &&
+    !route.allowedSenders.some(
+      (peer) => peer.toLowerCase() === route.sender.toLowerCase(),
+    )
+  )
+    return false;
+  const destination = await client.slack.getConversation(
+    route.connection,
+    route.conversation,
+  );
+  if (
+    destination?.id !== route.conversation ||
+    destination.is_im !== true ||
+    destination.is_mpim === true ||
+    destination.is_archived === true ||
+    destination.user !== route.actor
+  )
+    return false;
+  const source = await archivedSlackSource(route, client);
+  if (
+    !source ||
+    source.senderAccess !== "direct" ||
+    source.botId ||
+    source.subtype ||
+    typeof source.text !== "string" ||
+    !source.text.trim()
+  )
+    return false;
+  route.archivedMessage = source.id;
+  route.text = source.text;
+  route.control = source.text.trim();
+  route.noControls ||= Boolean(source.files?.length);
   return true;
 }

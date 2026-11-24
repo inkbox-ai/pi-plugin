@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHmac } from "node:crypto";
 import { once } from "node:events";
 import {
@@ -14,6 +15,13 @@ import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
 import { createGatewayRuntime, startGateway } from "../gateway/index.js";
+
+import {
+  nativePhoneFixture,
+  smsFixture,
+  emailFixture,
+  slackFixture,
+} from "./fixtures/project-peers.js";
 
 const identity = {
   id: "agent",
@@ -268,210 +276,182 @@ test(
   },
 );
 
-for (const channel of ["imessage", "whatsapp"])
+// These tests stub the remote model and Inkbox network peers, not Pi, its extension,
+// subprocesses, approvals, session storage or routing.
+async function projectSession(t, fixture, respond, config = {}) {
+  const home = mkdtempSync(join(tmpdir(), "pi-project-"));
+  const workspace = join(home, "workspace");
+  const agentDir = join(home, "agent");
+  mkdirSync(workspace);
+  mkdirSync(agentDir);
+  const requests = [];
+  const server = createServer(async (req, res) => {
+    if (req.url !== "/v1/chat/completions") {
+      res.writeHead(404).end();
+      return;
+    }
+    let body = "";
+    for await (const chunk of req) body += chunk;
+    requests.push(JSON.parse(body));
+    const next = respond(requests.length - 1);
+    if (typeof next === "string") {
+      modelResponse(res, next);
+      return;
+    }
+    const { name, args } = next;
+    streamCompletion(res, [
+      [
+        {
+          role: "assistant",
+          tool_calls: [
+            {
+              index: 0,
+              id: "call_" + name,
+              type: "function",
+              function: { name, arguments: JSON.stringify(args) },
+            },
+          ],
+        },
+        null,
+      ],
+      [{}, "tool_calls"],
+    ]);
+  });
+  const api = "http://127.0.0.1:" + (await listen(server));
+  configurePi(t, home, agentDir, api);
+  let runtime;
+  t.after(async () => {
+    await runtime?.close();
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(home, { recursive: true, force: true });
+  });
+  runtime = createGatewayRuntime(
+    {
+      home,
+      projectDirectory: workspace,
+      baseUrl: api,
+      projectFiles: ["project.txt"],
+      trustedConversations: fixture.grants,
+      piBin: resolve("node_modules/.bin/pi"),
+      ...config,
+    },
+    fixture,
+  );
+  return {
+    runtime,
+    workspace,
+    requests,
+    replies: fixture.replies,
+    submit: (...args) => runtime.acceptVerified(fixture.event(...args)),
+  };
+}
+
+async function until(predicate, message) {
+  const deadline = Date.now() + 15_000;
+  while (!predicate() && Date.now() < deadline) await delay(20);
+  assert.ok(predicate(), message);
+}
+
+function command(prompt, word = "approve") {
+  const match = prompt.match(
+    new RegExp("/" + word + " ([a-f0-9]{24})\\b", "i"),
+  );
+  assert.ok(match, "Expected an explicit /" + word + " command in: " + prompt);
+  return match[0];
+}
+
+const editChannels = {
+  imessage: () => nativePhoneFixture("imessage"),
+  whatsapp: () => nativePhoneFixture("whatsapp"),
+  sms: smsFixture,
+  slack: slackFixture,
+  email: emailFixture,
+};
+for (const [channel, makeFixture] of Object.entries(editChannels))
   test(
     `real Pi edits a granted file only after approval from the original ${channel} conversation`,
     { timeout: 45_000 },
     async (t) => {
-      const home = mkdtempSync(join(tmpdir(), "pi-project-approval-"));
-      const workspace = join(home, "workspace");
-      const agentDir = join(home, "agent");
-      mkdirSync(workspace);
-      mkdirSync(agentDir);
+      const native = ["imessage", "whatsapp"].includes(channel);
+      const fixture = makeFixture();
       const file = "project.txt";
+      const finalAnswer = "I changed the status to ready.";
+      const { runtime, workspace, replies, requests, submit } =
+        await projectSession(
+          t,
+          fixture,
+          (n) =>
+            n === 0
+              ? {
+                  name: "inkbox_project_replace",
+                  args: { file, oldText: "draft", newText: "ready" },
+                }
+              : finalAnswer,
+          { slackEnabled: channel === "slack" },
+        );
       const filePath = join(workspace, file);
       writeFileSync(filePath, "Status: draft\n");
-      const modelRequests = [];
-      const finalAnswer = "I changed the status to ready.";
-      const server = createServer(async (req, res) => {
-        if (req.url !== "/v1/chat/completions") {
-          res.writeHead(404).end();
-          return;
-        }
-        let body = "";
-        for await (const chunk of req) body += chunk;
-        modelRequests.push(JSON.parse(body));
-        if (modelRequests.length === 1) {
-          streamCompletion(res, [
-            [
-              {
-                role: "assistant",
-                tool_calls: [
-                  {
-                    index: 0,
-                    id: "call_replace",
-                    type: "function",
-                    function: {
-                      name: "inkbox_project_replace",
-                      arguments: JSON.stringify({
-                        file,
-                        oldText: "draft",
-                        newText: "ready",
-                      }),
-                    },
-                  },
-                ],
-              },
-              null,
-            ],
-            [{}, "tool_calls"],
-          ]);
-        } else {
-          modelResponse(res, finalAnswer);
-        }
-      });
-      const api = "http://127.0.0.1:" + (await listen(server));
-      configurePi(t, home, agentDir, api);
-
-      const owner = "+12025550102",
-        other = "+12025550103";
-      const sources = new Map();
-      const peers = { "owners-chat": owner, "other-chat": other };
-      const replies = [];
-      const line = "+12025550101";
-      const metadata = {
-        agentIdentityId: "agent",
-        localNumber: line,
-        unresolvedParticipantCount: 0,
-      };
-      const topRoot = (id) => (channel === "imessage" ? id : null);
-      const identity = {
-        id: "agent",
-        imessageEnabled: true,
-        imessageNumber: { number: line },
-        whatsappNumber: line,
-        async [channel === "imessage" ? "getIMessage" : "getWhatsAppMessage"](
-          id,
-        ) {
-          return sources.get(id);
-        },
-        async [channel === "imessage"
-          ? "getIMessageConversation"
-          : "getWhatsAppConversation"](id) {
-          const peer = peers[id];
-          return {
-            id,
-            ...metadata,
-            isGroup: false,
-            remoteNumber: peer,
-            participants: [peer],
-            assignmentId: null,
-          };
-        },
-        async [channel === "imessage" ? "sendIMessage" : "sendWhatsApp"](
-          message,
-        ) {
-          if (message.replyToMessageId) {
-            const parent = sources.get(message.replyToMessageId);
-            parent.threadRootMessageId ??= parent.id;
-          }
-          replies.push(message);
-          return { id: "reply-" + replies.length };
-        },
-      };
-      let runtime;
-      t.after(async () => {
-        await runtime?.close();
-        server.closeAllConnections();
-        await new Promise((resolve) => server.close(resolve));
-        rmSync(home, { recursive: true, force: true });
-      });
-      runtime = createGatewayRuntime(
-        {
-          home,
-          projectDirectory: workspace,
-          baseUrl: api,
-          projectFiles: [file],
-          trustedConversations: Object.entries(peers).map(
-            ([chat, peer]) => channel + ":" + chat + ":" + peer,
-          ),
-          piBin: resolve("node_modules/.bin/pi"),
-        },
-        { client: {}, identity },
+      assert.equal(
+        submit("edit", "owners-chat", "Please change the status to ready."),
+        "accepted",
       );
-
-      function submit(id, chat, text, threadRoot) {
-        const peer = peers[chat];
-        sources.set(id, {
-          id,
-          conversationId: chat,
-          threadRootMessageId: threadRoot ?? topRoot(id),
-          ...metadata,
-          senderAccess: "direct",
-          direction: "inbound",
-          service: "imessage",
-          isGroup: false,
-          isBlocked: false,
-          remoteNumber: peer,
-          participants: [peer],
-          assignmentId: null,
-          content: text,
-        });
-        return runtime.acceptVerified({
-          id,
-          event_type: channel + ".received",
-          data: {
-            message: {
-              id,
-              conversation_id: chat,
-              thread_root_message_id: threadRoot ?? topRoot(id),
-              agent_identity_id: identity.id,
-              remote_number: peer,
-              direction: "inbound",
-              sender_access: "direct",
-              content: text,
-            },
-          },
-        });
+      const offset = channel === "email" ? 1 : 0;
+      if (channel === "email") {
+        await until(() => replies.length === 1, "Missing mailbox challenge");
+        assert.equal(replies[0].conversationId, "owners-chat");
+        const verify = command(replies[0].text, "verify");
+        assert.equal(
+          requests.length,
+          0,
+          "No model access before mailbox possession is proven",
+        );
+        assert.equal(submit("foreign-verify", "other-chat", verify), "ignored");
+        assert.equal(submit("verify", "owners-chat", verify), "accepted");
       }
-      async function until(predicate, message) {
-        const deadline = Date.now() + 15_000;
-        while (!predicate() && Date.now() < deadline) await delay(20);
-        assert.ok(predicate(), message);
+      await until(() => replies.length > offset, "Pi did not request approval");
+      const prompt = replies[offset];
+      assert.equal(prompt.conversationId, "owners-chat");
+      if (native) {
+        assert.equal(prompt.plainReplyFallback, false);
+        assert.equal(prompt.replyToMessageId, "edit");
       }
-
-      const original = "Please change the status to ready.";
-      assert.equal(submit("edit", "owners-chat", original), "accepted");
-      await until(() => replies.length > 0, "Pi did not request approval");
-      assert.equal(replies[0].conversationId, "owners-chat");
-      assert.equal(replies[0].plainReplyFallback, false);
-      assert.equal(replies[0].replyToMessageId, "edit");
-      assert.match(replies[0].text, /project\.txt/);
-      assert.match(replies[0].text, /draft/);
-      assert.match(replies[0].text, /ready/);
-      const approval = replies[0].text.match(/\/approve ([a-f0-9]{24})\b/i);
-      assert.ok(approval, "Expected an explicit approval command");
+      assert.match(prompt.text, /project\.txt/);
+      assert.match(prompt.text, /draft/);
+      assert.match(prompt.text, /ready/);
+      const approve = command(prompt.text);
       assert.match(
-        JSON.stringify(modelRequests[0].messages),
+        JSON.stringify(requests[0].messages),
         /Please change the status to ready/,
       );
-      const tools = modelRequests[0].tools.map((tool) => tool.function);
+      const tools = requests[0].tools.map((tool) => tool.function);
       assert.deepEqual(tools.map(({ name }) => name).sort(), [
+        "inkbox_project_ask",
+        "inkbox_project_email",
         "inkbox_project_read",
         "inkbox_project_replace",
+        "inkbox_project_search",
       ]);
-      for (const tool of tools)
+      for (const tool of tools.filter(({ name }) =>
+        ["inkbox_project_read", "inkbox_project_replace"].includes(name),
+      ))
         assert.deepEqual(tool.parameters.properties.file.enum, [file]);
       assert.equal(readFileSync(filePath, "utf8"), "Status: draft\n");
 
-      // Even a different owner-granted chat with the exact command cannot release the edit.
-      assert.equal(submit("foreign", "other-chat", approval[0]), "ignored");
+      // Even a different granted chat with the exact command cannot release the edit.
+      assert.equal(submit("foreign", "other-chat", approve), "ignored");
       assert.equal(runtime.eventState("foreign"), "unknown");
-      const staleCode =
-        (approval[1][0] === "0" ? "1" : "0") + approval[1].slice(1);
-      assert.equal(
-        submit("stale", "owners-chat", "/approve " + staleCode),
-        "ignored",
-      );
+      const stale = approve.slice(0, -1) + (approve.endsWith("0") ? "1" : "0");
+      assert.equal(submit("stale", "owners-chat", stale), "ignored");
       assert.equal(runtime.eventState("stale"), "unknown");
       assert.equal(readFileSync(filePath, "utf8"), "Status: draft\n");
-      assert.equal(modelRequests.length, 1);
+      assert.equal(requests.length, 1);
       assert.equal(
         submit(
           "approved",
           "owners-chat",
-          approval[0],
-          channel === "imessage" ? undefined : "edit",
+          approve,
+          ["whatsapp", "slack"].includes(channel) ? "edit" : undefined,
         ),
         "accepted",
       );
@@ -481,20 +461,153 @@ for (const channel of ["imessage", "whatsapp"])
       );
       assert.equal(runtime.eventState("approved"), "done");
       assert.equal(readFileSync(filePath, "utf8"), "Status: ready\n");
-      assert.equal(modelRequests.length, 2);
-      const toolResult = modelRequests[1].messages.find(
-        (message) => message.role === "tool",
-      );
-      assert.ok(toolResult, "Pi must have executed the real tool");
-      assert.equal(toolResult.tool_call_id, "call_replace");
-      assert.match(JSON.stringify(toolResult.content), /File updated\./);
-      assert.notEqual(replies[0].idempotencyKey, replies[1].idempotencyKey);
+      assert.equal(requests.length, 2);
+      const result = requests[1].messages.find((m) => m.role === "tool");
+      assert.ok(result);
+      assert.equal(result.tool_call_id, "call_inkbox_project_replace");
+      assert.match(JSON.stringify(result.content), /File updated\./);
+      assert.notEqual(prompt.idempotencyKey, replies.at(-1).idempotencyKey);
       assert.deepEqual(
-        replies.map(({ conversationId, text }) => [conversationId, text]),
+        replies
+          .slice(offset)
+          .map(({ conversationId, text }) => [conversationId, text]),
         [
-          ["owners-chat", replies[0].text],
+          ["owners-chat", prompt.text],
           ["owners-chat", finalAnswer],
         ],
       );
     },
   );
+
+test(
+  "real Pi investigates a project, runs the approved test, asks the requester and emails only the approved result",
+  { timeout: 75_000 },
+  async (t) => {
+    const fixture = nativePhoneFixture("imessage");
+    const { identity, replies } = fixture;
+    const emails = [];
+    identity.mailbox = { id: "mailbox", emailAddress: "agent@example.test" };
+    identity.sendEmail = async (message) => {
+      emails.push(message);
+      return { id: "outbound-" + emails.length, status: "sent" };
+    };
+    const file = "project.txt";
+    const source = "src/check.js";
+    const recipient = "release@example.test",
+      subject = "Project check",
+      body = "The release fixture passed.";
+    const question = "Who should receive the release check?";
+    const reply = "Please send it to release@example.test.";
+    const final = "I tested the project and emailed the approved result.";
+    const actions = [
+      { name: "inkbox_project_search", args: { query: "release fixture" } },
+      { name: "inkbox_project_read", args: { file: source } },
+      { name: "inkbox_project_test", args: {} },
+      { name: "inkbox_project_ask", args: { question } },
+      { name: "inkbox_project_email", args: { recipient, subject, body } },
+    ];
+    const { workspace, runtime, requests, submit } = await projectSession(
+      t,
+      fixture,
+      (n) => actions[n] ?? final,
+      {
+        // The owner configures the exact test. Pi supplies no arguments.
+        projectReadWorkspace: true,
+        projectTestCommand: ["node", source],
+      },
+    );
+    mkdirSync(join(workspace, "src"));
+    writeFileSync(
+      join(workspace, source),
+      [
+        "// release fixture: hydrate inputs",
+        'const assert = require("node:assert/strict");',
+        'const value = require("node:fs").readFileSync("project.txt", "utf8").trim();',
+        'assert.equal(value, "release fixture passed");',
+        "console.log(value.toUpperCase());",
+      ].join("\n"),
+    );
+    execFileSync("/usr/bin/git", ["init", "--quiet", workspace]);
+    execFileSync("/usr/bin/git", ["-C", workspace, "add", "--", source]);
+    writeFileSync(join(workspace, file), "release fixture passed\n");
+    assert.equal(
+      submit(
+        "work",
+        "owners-chat",
+        "Investigate the release fixture, run its test, and ask where to send the result.",
+      ),
+      "accepted",
+    );
+    await until(
+      () => replies.length >= 1,
+      "The gateway did not ask to run the configured test",
+    );
+    assert.match(replies[0].text, /node/);
+    assert.match(replies[0].text, /src\/check\.js/);
+    assert.equal(requests.length, 3);
+    const toolOutput = (requestIndex, tool) => {
+      const result = requests[requestIndex].messages.find(
+        (m) => m.role === "tool" && m.tool_call_id === "call_" + tool,
+      );
+      assert.ok(result, "Missing real Pi result for " + tool);
+      return typeof result.content === "string"
+        ? result.content
+        : JSON.stringify(result.content);
+    };
+    assert.match(toolOutput(1, "inkbox_project_search"), /src\/check\.js/);
+    assert.match(
+      toolOutput(2, "inkbox_project_read"),
+      /release fixture: hydrate inputs/,
+    );
+    assert.equal(emails.length, 0);
+    const approveTest = command(replies[0].text);
+    assert.equal(
+      submit("approve-test", "owners-chat", approveTest),
+      "accepted",
+    );
+
+    await until(
+      () => replies.length >= 2,
+      "Pi did not forward its follow-up question",
+    );
+    assert.match(replies[1].text, /Who should receive the release check\?/);
+    assert.equal(requests.length, 4);
+    const testResult = toolOutput(3, "inkbox_project_test");
+    assert.match(testResult, /exit 0/);
+    assert.match(testResult, /RELEASE FIXTURE PASSED/);
+    const answer = command(replies[1].text, "answer") + " " + reply;
+    assert.equal(submit("foreign-answer", "other-chat", answer), "ignored");
+    assert.equal(submit("answer", "owners-chat", answer), "accepted");
+
+    await until(
+      () => replies.length >= 3,
+      "Pi did not request approval of the exact email",
+    );
+    assert.equal(requests.length, 5);
+    assert.ok(toolOutput(4, "inkbox_project_ask").includes(reply));
+    for (const detail of [recipient, subject, body])
+      assert.ok(replies[2].text.includes(detail));
+    assert.equal(emails.length, 0);
+    const approveEmail = command(replies[2].text);
+    assert.notEqual(approveEmail, approveTest);
+    assert.equal(submit("reused-token", "owners-chat", approveTest), "ignored");
+    assert.equal(
+      submit("approve-email", "owners-chat", approveEmail),
+      "accepted",
+    );
+
+    await until(
+      () => runtime.eventState("work") === "done",
+      "The requester did not receive Pi's completion",
+    );
+    assert.equal(requests.length, 6);
+    assert.match(toolOutput(5, "inkbox_project_email"), /Email sent\./);
+    assert.equal(emails.length, 1);
+    const { idempotencyKey, ...sent } = emails[0];
+    assert.ok(idempotencyKey);
+    assert.deepEqual(sent, { to: [recipient], subject, bodyText: body });
+    assert.equal(replies.length, 4);
+    assert.ok(replies.every((r) => r.conversationId === "owners-chat"));
+    assert.equal(replies.at(-1).text, final);
+  },
+);

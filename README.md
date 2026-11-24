@@ -70,14 +70,37 @@ In a direct conversation, send `/status` for work status, `/stop` or `/cancel` t
 
 If your model credential exists only in a shell variable, set `INKBOX_PI_MODEL_ENV` to the **name** of the supported credential variable before installing or starting the service. The value is kept in the private service profile, not in the service definition. This isn't necessary when Pi already has a saved login.
 
-Incoming turns cannot read or edit project files by default. To grant bounded read/replace access, set `INKBOX_PI_PROJECT_FILES` to comma-separated, existing paths relative to the project, then grant either:
+### Project work from a direct conversation
 
-- An agent-to-agent caller: set `INKBOX_PI_TRUSTED_AGENT_IDS` to exact Inkbox identity IDs.
-- A one-to-one native iMessage or WhatsApp conversation: set `INKBOX_PI_TRUSTED_CONVERSATIONS` to comma-separated `channel:conversation-id:sender-number` bindings (for example, `imessage:YOUR-CONVERSATION-ID:+12025550123`). Use the Inkbox conversation ID and the peer's full international number, not a display name. The gateway checks the identity-owned inbound message and current destination before running Pi and again before sending.
+A trusted sender can ask Pi to investigate code, run a configured test, ask a follow-up, and email the result. This works in a one-to-one **email thread, SMS, native iMessage, WhatsApp, or connected Slack DM**. It does not share history across channels or expose a general shell. Other senders still get ordinary, reply-only conversations.
 
-In a trusted phone conversation, reads use the grant directly. For each proposed edit, the gateway sends the file name and exact old and new text back to that conversation. Send the displayed `/approve CODE` or `/deny CODE` in the same thread before the displayed deadline (up to two minutes). Approval applies to that edit only. Another sender cannot approve it; restarting the gateway or letting the request expire leaves the edit unapproved. Changes too long to show in full are not applied. Trusted agent-to-agent callers use their configured file grant directly.
+Set `INKBOX_PI_TRUSTED_CONVERSATIONS` to a comma-separated list of exact bindings. Use Inkbox conversation or thread IDs, not contact display names:
 
-Restart the gateway after changing grants. Removing a grant or changing its file list prevents reuse of the old privileged session and suppresses its pending replies. Groups, Companion turns, SMS (including downgraded iMessage), and email never receive project tools. A grant does not enable a shell or other Pi tools.
+| Channel | Binding |
+|---|---|
+| Email | `email:THREAD-ID:person@example.com` |
+| SMS | `sms:CONVERSATION-ID:+12025550123` |
+| iMessage | `imessage:CONVERSATION-ID:+12025550123` |
+| WhatsApp | `whatsapp:CONVERSATION-ID:+12025550123` |
+| Slack DM | `slack:CONNECTION-ID:D0123456789:T0123456789:U0123456789` (connection, DM, sender team, sender user); enable Slack first |
+
+Choose the project directory and the access you want to grant. For example, on Linux:
+
+```sh
+export INKBOX_PI_PROJECT_DIR="$PWD"
+export INKBOX_PI_PROJECT_FILES='src/status.ts,README.md'
+export INKBOX_PI_PROJECT_READ_WORKSPACE=true
+export INKBOX_PI_PROJECT_TEST_COMMAND='["npm","test"]'
+```
+
+- **Read and search:** named files are readable. Optional workspace reads also cover supported Git-tracked source files; they do not make any additional files editable.
+- **Edit:** the sender sees the file, old text and new text before approving a single replacement. If the change cannot be displayed in full, Pi does not apply it.
+- **Test:** the sender sees the configured executable and arguments. Pi cannot supply its own shell command. The gateway runs the approved command in a disposable workspace, not the live checkout. On Linux, install `bubblewrap` with working user namespaces; install project dependencies beforehand. On macOS the runner uses `sandbox-exec` and supports single-process tests. A runner that cannot isolate the command does not execute it.
+- **Ask and email:** Pi can send a question to the requester without opening a new model turn. Before sending an email, it shows the exact recipient, subject and plain-text body. Sending requires an Inkbox mailbox and respects the configured recipient restrictions.
+
+Reply in the originating conversation with the displayed `/approve CODE`, `/deny CODE`, or `/answer CODE your answer` before the deadline. **For email, first reply to the mailbox challenge with `/verify CODE`: an incoming From address alone does not grant access to the project.** Decisions expire in at most two minutes and do not survive a gateway restart. Run the gateway with the new settings after changing grants; for a managed service use `inkbox-pi restart`. Groups, copied email participants and Companion messages do not inherit a direct grant.
+
+Agent-to-agent grants are separate. `INKBOX_PI_TRUSTED_AGENT_IDS` allows named agent identities to use the configured files directly; it does not give them the direct sender's workspace, test, or email tools.
 
 For unattended setup with an existing identity, pass its key through stdin rather than a command-line argument:
 

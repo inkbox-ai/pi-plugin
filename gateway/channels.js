@@ -1,4 +1,7 @@
+import { archivedSlackSource, findTextConversation } from "./source-lookups.js";
 import {
+  directBinding,
+  mailControl,
   phoneSubthread,
   samePhoneThread,
   verifyProjectConversation,
@@ -176,7 +179,7 @@ export function parseRoute(event, identity, allowedSenders = [], options = {}) {
         if (!identity.mailbox || record.mailbox_id !== identity.mailbox.id)
           return null;
         channel = "email";
-        sender = clean(record.from_address);
+        sender = normalized(record.from_address);
         conversation = clean(record.thread_id) || message;
         text =
           [
@@ -196,7 +199,7 @@ export function parseRoute(event, identity, allowedSenders = [], options = {}) {
             normalized(a).replace(/^.*<([^>]+)>$/, "$1") ===
             normalized(identity.mailbox.emailAddress),
         );
-        control = clean(record.body);
+        control = mailControl(record.body);
         break;
       case "text.received":
         if (
@@ -306,7 +309,7 @@ export function parseRoute(event, identity, allowedSenders = [], options = {}) {
     archivedMessage,
     control,
     sponsored,
-    directAccess: record?.sender_access === "direct",
+    directAccess: (record ?? data).sender_access === "direct",
     assignment: channel === "imessage" ? (record?.assignment_id ?? null) : null,
     allowedSenders,
     groupReplyMode: options.groupReplyMode ?? "auto",
@@ -340,7 +343,14 @@ export function parseRoute(event, identity, allowedSenders = [], options = {}) {
     route.group ||
     Boolean(route.companion) ||
     route.channel === "a2a" ||
-    (channel === "slack" && allowedSenders.length > 0);
+    (channel === "slack" &&
+      allowedSenders.length > 0 &&
+      !(
+        options.trustedConversations?.includes(directBinding(route)) &&
+        (options.projectFiles?.length ||
+          options.projectReadWorkspace ||
+          options.projectTestCommand?.length)
+      ));
   if (
     route.group &&
     route.channel !== "sms" &&
@@ -416,32 +426,8 @@ async function slackSource(route, client, identity) {
       return false;
   }
   if (route.companion || (waitsForTranscript(route) && route.archivedMessage)) {
-    const match = /^(\d{1,12})\.(\d{1,6})$/.exec(route.message);
-    if (!match) return false;
-    const ticks = BigInt(match[1]) * 1000000n + BigInt(match[2].padEnd(6, "0"));
-    const ts = (n) =>
-      String(n / 1000000n) + "." + String(n % 1000000n).padStart(6, "0");
-    const page = await client.slack.listArchivedMessages(route.connection, {
-      conversationId: route.conversation,
-      afterTs: ts(ticks - 1n),
-      beforeTs: ts(ticks + 1n),
-      limit: 2,
-    });
-    const source = page.messages[0];
-    if (
-      page.nextCursor ||
-      page.messages.length !== 1 ||
-      !source?.id ||
-      source.connectionId !== route.connection ||
-      source.conversationId !== route.conversation ||
-      source.messageTs !== route.message ||
-      source.userId !== route.actor ||
-      source.source !== "event" ||
-      (route.archivedMessage && route.archivedMessage !== source.id) ||
-      (source.threadTs === source.messageTs ? "" : (source.threadTs ?? "")) !==
-        (route.subthread === route.message ? "" : (route.subthread ?? ""))
-    )
-      return false;
+    const source = await archivedSlackSource(route, client);
+    if (!source) return false;
     route.archivedMessage = source.id;
     refreshMedia(route, source.files);
   }
@@ -480,65 +466,45 @@ async function smsSource(route, identity) {
   // The SMS notification names the authoritative phone and conversation, but
   // does not carry isGroup/participants. A null recipients array is normal
   // for inbound group MMS. Resolve the current membership for every turn.
-  const limit = 200;
-  let offset = 0;
-  const seenPages = new Set();
-  for (;;) {
-    const page = await identity.listTextConversations({
-      participants: [route.sender],
-      includeGroups: true,
-      limit,
-      offset,
-    });
-    const matches = page.filter((item) => item.id === route.conversation);
-    if (matches.length) {
-      if (matches.length !== 1) return false;
-      const conversation = matches[0];
-      if (
-        typeof conversation.isGroup !== "boolean" ||
-        !Array.isArray(conversation.participants) ||
-        !conversation.participants.length ||
-        conversation.participants.some(
-          (p) => typeof p !== "string" || !/^\+[1-9]\d{6,14}$/.test(p),
-        ) ||
-        !conversation.participants.includes(route.sender)
-      )
-        return false;
-      const members = [...new Set(conversation.participants)].sort();
-      if (
-        members.length !== conversation.participants.length ||
-        conversation.isGroup !== members.length > 1 ||
-        (!conversation.isGroup &&
-          conversation.remotePhoneNumber !== route.sender) ||
-        (route.companion && !conversation.isGroup)
-      )
-        return false;
-      // A send replay must not expand the audience that saw the original turn.
-      if (
-        route.smsMembers &&
-        JSON.stringify(route.smsMembers) !== JSON.stringify(members)
-      )
-        return false;
-      route.smsMembers = members;
-      route.group = conversation.isGroup;
-      route.noControls ||= route.group;
-      return (
-        (!route.group ||
-          route.groupReplyMode !== "mention" ||
-          mentionsAgent(route.caption ?? route.text, identity.agentHandle)) &&
-        recipientsAllowed(route, members, [identity.phoneNumber.number])
-      );
-    }
-    if (page.length < limit) return false;
-    const fingerprint = digest(page.map((item) => item.id));
-    if (seenPages.has(fingerprint)) return false;
-    seenPages.add(fingerprint);
-    offset += page.length;
-  }
+  const conversation = await findTextConversation(route, identity);
+  if (!conversation) return false;
+  if (
+    typeof conversation.isGroup !== "boolean" ||
+    !Array.isArray(conversation.participants) ||
+    !conversation.participants.length ||
+    conversation.participants.some(
+      (p) => typeof p !== "string" || !/^\+[1-9]\d{6,14}$/.test(p),
+    ) ||
+    !conversation.participants.includes(route.sender)
+  )
+    return false;
+  const members = [...new Set(conversation.participants)].sort();
+  if (
+    members.length !== conversation.participants.length ||
+    conversation.isGroup !== members.length > 1 ||
+    (!conversation.isGroup &&
+      conversation.remotePhoneNumber !== route.sender) ||
+    (route.companion && !conversation.isGroup)
+  )
+    return false;
+  // A send replay must not expand the audience that saw the original turn.
+  if (
+    route.smsMembers &&
+    JSON.stringify(route.smsMembers) !== JSON.stringify(members)
+  )
+    return false;
+  route.smsMembers = members;
+  route.group = conversation.isGroup;
+  route.noControls ||= route.group;
+  return (
+    (!route.group ||
+      route.groupReplyMode !== "mention" ||
+      mentionsAgent(route.caption ?? route.text, identity.agentHandle)) &&
+    recipientsAllowed(route, members, [identity.phoneNumber.number])
+  );
 }
 
 async function messagingSource(route, identity) {
-  if (route.projectGrant) return verifyProjectConversation(route, identity);
   if (route.channel === "email") {
     const source = await identity.getMessage(route.message);
     if (
@@ -679,7 +645,10 @@ export async function beforeTurn(
   { hasSession = false } = {},
 ) {
   if (route.channel === "a2a") return taskSource(route, identity);
-  if (route.channel === "slack") {
+  if (route.projectGrant) {
+    if (!(await verifyProjectConversation(route, identity, client)))
+      return false;
+  } else if (route.channel === "slack") {
     if (!(await slackSource(route, client, identity))) return false;
   } else if (!(await messagingSource(route, identity))) return false;
   if (route.media?.length && !route.projectGrant) {
@@ -695,12 +664,26 @@ export async function sendReply(route, text, idempotencyKey, client, identity) {
     throw new Error("Companion reply scope has changed.");
   if (
     route.channel !== "a2a" &&
-    route.channel !== "slack" &&
-    !(await messagingSource(route, identity))
+    (route.projectGrant
+      ? !(await verifyProjectConversation(route, identity, client))
+      : route.channel !== "slack" && !(await messagingSource(route, identity)))
   )
     throw new Error("Message destination changed.");
   switch (route.channel) {
     case "email": {
+      if (route.projectGrant) {
+        // Never let Reply-To, a reply-all suggestion, or a changed conversation
+        // choose the recipient of a challenge or project content.
+        return identity.sendEmail({
+          to: [route.sender],
+          subject: /^re:/i.test(route.mailSubject)
+            ? route.mailSubject
+            : "Re: " + route.mailSubject,
+          bodyText: text,
+          inReplyToMessageId: route.mailParent,
+          idempotencyKey,
+        });
+      }
       const parent = route.companionReply?.replyToMessageId ?? route.message;
       if (route.companionReply) {
         const source = await identity.getMessage(parent);
@@ -728,7 +711,9 @@ export async function sendReply(route, text, idempotencyKey, client, identity) {
     }
     case "sms":
       return identity.sendText({
-        conversationId: route.conversation,
+        ...(route.projectGrant
+          ? { to: route.sender }
+          : { conversationId: route.conversation }),
         text,
         idempotencyKey,
       });
@@ -752,15 +737,25 @@ export async function sendReply(route, text, idempotencyKey, client, identity) {
         idempotencyKey,
       });
     case "slack": {
-      if (!(await slackSource(route, client, identity)))
+      if (!route.projectGrant && !(await slackSource(route, client, identity)))
         throw new Error("Slack destination changed.");
+      const threadTs =
+        route.subthread ||
+        (route.projectGrant && route.editApprovalPrompt ? route.message : null);
       const action = await client.slack.sendMessage(route.connection, {
         conversationId: route.conversation,
-        threadTs: route.subthread || null,
+        threadTs,
         text,
         idempotencyKey,
       });
-      if (action.status !== "sent")
+      if (
+        action.status !== "sent" ||
+        (route.projectGrant &&
+          (!action.messageTs ||
+            action.connectionId !== route.connection ||
+            action.conversationId !== route.conversation ||
+            (action.threadTs ?? null) !== threadTs))
+      )
         throw new Error("Slack send not confirmed.");
       return action;
     }

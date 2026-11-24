@@ -1,8 +1,11 @@
+import { isToolEnabled } from "../extension/selection.ts";
+import { runProjectTest } from "./project-test.js";
 import { journalDirectory } from "./journal.js";
 import {
   createEditApprovals,
   isEditControl,
   reservedEditControl,
+  normalizedCommand,
 } from "./approvals.js";
 import { DatabaseSync } from "node:sqlite";
 import {
@@ -32,6 +35,7 @@ import { hasProjectGrant, runPiTurn } from "./pi.js";
 
 import {
   directBinding,
+  projectAudience,
   openProjectGrants,
   verifyProjectConversation,
 } from "./project-grants.js";
@@ -94,6 +98,7 @@ export function createGatewayRuntime(
       DELETE FROM notices WHERE received < unixepoch() - 2592000;
       CREATE INDEX IF NOT EXISTS runnable ON jobs(state, due);
       CREATE INDEX IF NOT EXISTS job_thread ON jobs(thread, state);
+      CREATE TABLE IF NOT EXISTS slack_session_generations(thread TEXT PRIMARY KEY, generation INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS sessions (
         thread TEXT PRIMARY KEY, revision TEXT NOT NULL, actor TEXT, sequence INTEGER
       );
@@ -110,6 +115,25 @@ export function createGatewayRuntime(
 
   const active = new Map();
   const approvals = createEditApprovals();
+  const dialogs = new Set([approvals]);
+  const decisionFor = (route, text) =>
+    [...dialogs].find((d) => d.matches(route, text));
+  function channelOwner(route) {
+    switch (route.channel) {
+      case "email":
+        return identity.mailbox?.id;
+      case "sms":
+        return identity.phoneNumber?.number;
+      case "slack":
+        return [route.connection, route.workspace, route.generation].join(":");
+      case "imessage":
+        return identity.imessageNumber?.number;
+      case "whatsapp":
+        return identity.whatsappNumber;
+      default:
+        return null;
+    }
+  }
   const done = Promise.withResolvers();
   done.promise.catch(() => {});
   let timer,
@@ -181,7 +205,8 @@ export function createGatewayRuntime(
         }
       });
       if (notice.state === "failed")
-        approvals.failedPrompt(notice.channel, notice.message);
+        for (const dialog of dialogs)
+          dialog.failedPrompt(notice.channel, notice.message);
       return "accepted";
     }
     const route =
@@ -219,11 +244,7 @@ export function createGatewayRuntime(
         "project-scope",
         route.projectGrant,
         route.assignment,
-        route.channel === "whatsapp"
-          ? identity.whatsappNumber
-          : route.channel === "imessage"
-            ? identity.imessageNumber?.number
-            : null,
+        route.channel === "slack" ? route.workspace : channelOwner(route),
       );
     if (stateOf.get(id)) {
       db.prepare("INSERT INTO receipts(event,job) VALUES(?,?)").run(
@@ -240,10 +261,11 @@ export function createGatewayRuntime(
         .get(route.thread)
     )
       return "ignored";
-    const text = (route.control ?? route.text).trim().toLowerCase();
+    const text = normalizedCommand(route.control ?? route.text);
     const editControl = reservedEditControl(route, text);
-    if (editControl && !approvals.matches(route, text)) return "ignored";
-    const command = COMMANDS.has(text) || editControl ? text : null;
+    const decision = editControl && decisionFor(route, text);
+    if (editControl && !decision) return "ignored";
+    const command = decision ? "/decision" : COMMANDS.has(text) ? text : null;
     if (
       command &&
       (route.noControls ||
@@ -264,7 +286,9 @@ export function createGatewayRuntime(
         "INSERT INTO jobs(id,thread,actor,sequence,command,payload,state) VALUES(?,?,?,?,?,?,?)",
       ).run(
         id,
-        (command && approvals.controlThread(route)) || route.thread,
+        (decision && decision.controlThread(route)) ||
+          (command && approvals.controlThread(route)) ||
+          route.thread,
         route.sender,
         route.sequence ?? null,
         command,
@@ -328,25 +352,70 @@ export function createGatewayRuntime(
     return prior.length ? "Stopped." : "Nothing is running.";
   }
 
-  async function directProjectTurn(job, route, file, signal) {
-    const turnEnded = new AbortController();
-    const ownNumber = () =>
-      route.channel === "imessage"
-        ? identity.imessageNumber?.number
-        : identity.whatsappNumber;
-    const originalNumber = ownNumber();
-    const confirmEdit = (proposal, hostSignal, remainingMs) => {
-      const signals = [signal, turnEnded.signal];
-      if (hostSignal) signals.push(hostSignal);
-      const allowed = (source) =>
-        source.projectGrant === projectGrantFor(source) &&
-        config.projectFiles?.includes(proposal?.file) &&
-        originalNumber === ownNumber();
-      return approvals.request({
+  function grantedRequest(job, route, turnSignal, dialog = approvals) {
+    const owner = channelOwner(route);
+    return async (proposal, hostSignal, remainingMs, mailboxProof = false) => {
+      const signal = hostSignal
+        ? AbortSignal.any([turnSignal, hostSignal])
+        : turnSignal;
+      const recipientAllowed = (target) => {
+        const list = config.outbound?.allowedRecipients ?? [];
+        return list.length
+          ? list.some((s) => s.trim().toLowerCase() === target.toLowerCase())
+          : config.outbound?.approval !== "allowlist";
+      };
+      const allowed = (source) => {
+        if (
+          signal.aborted ||
+          !owner ||
+          owner !== channelOwner(source) ||
+          !source.projectGrant ||
+          source.projectGrant !== projectGrantFor(source) ||
+          !recipientAllowed(projectAudience(source))
+        )
+          return false;
+        if (
+          config.allowedSenders?.length &&
+          !config.allowedSenders.some(
+            (s) => s.trim().toLowerCase() === source.sender.toLowerCase(),
+          )
+        )
+          return false;
+        if (source.channel === "slack" && !config.slackEnabled) return false;
+        if (mailboxProof) return source.channel === "email";
+        switch (proposal?.kind) {
+          case "email":
+            return Boolean(
+              identity.mailbox?.id &&
+                isToolEnabled(
+                  {
+                    name: "inkbox_send_email",
+                    group: "email",
+                    defaultEnabled: true,
+                  },
+                  new Set(config.tools?.enable),
+                  new Set(config.tools?.disable),
+                ) &&
+                recipientAllowed(proposal.recipient),
+            );
+          case "test":
+            return (
+              Array.isArray(config.projectTestCommand) &&
+              JSON.stringify(config.projectTestCommand) ===
+                JSON.stringify(proposal.command)
+            );
+          case "question":
+            return true;
+          default:
+            return config.projectFiles?.includes(proposal?.file);
+        }
+      };
+      const approved = await dialog.request({
         route,
         proposal,
+        mailboxProof,
+        signal,
         remainingMs,
-        signal: AbortSignal.any(signals),
         async verify(source, expectedCommand) {
           if (!allowed(source)) return false;
           const copy = {
@@ -354,50 +423,77 @@ export function createGatewayRuntime(
             allowedRecipients: config.outbound?.allowedRecipients ?? [],
           };
           if (
-            config.outbound?.approval === "allowlist" &&
-            !copy.allowedRecipients.length
+            !(await verifyProjectConversation(copy, identity, client)) ||
+            !allowed(copy)
           )
             return false;
-          if (
-            config.allowedSenders?.length &&
-            !config.allowedSenders.includes(source.sender)
-          )
-            return false;
-          return (
-            (await verifyProjectConversation(copy, identity)) &&
-            allowed(source) &&
-            (expectedCommand
-              ? copy.text.trim().toLowerCase() === expectedCommand
-              : copy.text === source.text)
-          );
+          return expectedCommand
+            ? normalizedCommand(copy.control ?? copy.text) === expectedCommand
+            : copy.text === source.text;
         },
-        send: async (prompt, code) => {
+        async send(prompt, code) {
           const sent = await reply(
             { ...route, editApprovalPrompt: true },
             prompt,
-            digest(job.id, "edit-approval", code),
+            digest(job.id, "project-dialog", code),
             client,
             identity,
           );
           if (
             sent?.id &&
             !signal.aborted &&
-            !turnEnded.signal.aborted &&
             db
               .prepare(
                 "SELECT state FROM notices WHERE channel=? AND message=?",
               )
               .get(route.channel, sent.id)?.state === "failed"
           )
-            throw new Error("The approval request could not be delivered.");
+            throw new Error("The project request could not be delivered.");
           return sent;
         },
       });
+      if (!approved || !allowed(route)) return false;
+      if (mailboxProof || !proposal.kind || proposal.kind === "question")
+        return approved;
+      if (proposal.kind === "test") return runProjectTest(config, signal);
+      // The SDK retries the same input under one key; a gateway restart never
+      // replays a project turn which may already have changed external state.
+      if (proposal.kind === "email") {
+        try {
+          const sent = await identity.sendEmail({
+            to: [proposal.recipient],
+            subject: proposal.subject,
+            bodyText: proposal.body,
+            idempotencyKey: digest(
+              job.id,
+              "project-email",
+              proposal.recipient,
+              proposal.subject,
+              proposal.body,
+            ),
+          });
+          return sent?.id
+            ? "sent"
+            : "Email submission is unconfirmed. Do not resend automatically.";
+        } catch {
+          return "Email submission was not confirmed. Do not claim success or resend automatically.";
+        }
+      }
+      return false;
     };
+  }
+
+  async function directProjectTurn(job, route, file, signal) {
+    const ended = new AbortController();
     try {
-      return await turn(config, route, file, signal, confirmEdit);
+      const request = grantedRequest(
+        job,
+        route,
+        AbortSignal.any([signal, ended.signal]),
+      );
+      return await turn(config, route, file, signal, request, request);
     } finally {
-      turnEnded.abort();
+      ended.abort();
     }
   }
 
@@ -405,8 +501,8 @@ export function createGatewayRuntime(
     const route = JSON.parse(job.payload);
     if (
       (job.command &&
-        isEditControl(job.command) &&
-        !approvals.matches(route, job.command)) ||
+        (job.command === "/decision" || isEditControl(job.command)) &&
+        !decisionFor(route, normalizedCommand(route.control ?? route.text))) ||
       (route.projectGrant && route.projectGrant !== projectGrantFor(route))
     ) {
       mark.run("ignored", job.id);
@@ -441,7 +537,7 @@ export function createGatewayRuntime(
       (route.projectGrant &&
         route.channel !== "a2a" &&
         allowedRecipients.length &&
-        !allowedRecipients.includes(route.sender)) ||
+        !matches(allowedRecipients, projectAudience(route))) ||
       (job.state === "reply" &&
         route.companion?.activation &&
         changedSenders &&
@@ -457,7 +553,8 @@ export function createGatewayRuntime(
     }
     let answer = job.answer;
     if (job.state === "queued") {
-      const session = getSession.get(job.thread);
+      let session = getSession.get(job.thread);
+      const admittedCommand = normalizedCommand(route.control ?? route.text);
       if (
         (session?.sequence != null &&
           job.sequence != null &&
@@ -485,27 +582,67 @@ export function createGatewayRuntime(
         db.prepare("DELETE FROM media_wait WHERE job=?").run(job.id);
       }
       if (
+        session &&
+        route.channel === "slack" &&
+        route.projectGrant &&
+        db
+          .prepare(
+            "SELECT generation FROM slack_session_generations WHERE thread=?",
+          )
+          .get(job.thread)?.generation !== route.generation
+      )
+        session = undefined;
+      const sourceCommand = normalizedCommand(route.control ?? route.text);
+      if (job.command === "/decision" && sourceCommand !== admittedCommand) {
+        mark.run("ignored", job.id);
+        return;
+      }
+      if (
         job.command &&
         (route.noControls ||
           (route.projectGrant &&
-            job.command !== route.text.trim().toLowerCase()))
+            job.command !== "/decision" &&
+            job.command !== sourceCommand))
       ) {
         mark.run("ignored", job.id);
         return;
       }
       if (
-        reservedEditControl(route, route.text.trim()) ||
+        reservedEditControl(route, sourceCommand) ||
+        job.command === "/decision" ||
         (job.command && isEditControl(job.command))
       ) {
         // beforeTurn authenticated the incoming control from Inkbox, including
         // its body. Never reinterpret a stale or mismatched control as a turn.
         const handled =
           job.command &&
-          isEditControl(job.command) &&
+          (job.command === "/decision" || isEditControl(job.command)) &&
           route.projectGrant &&
-          approvals.consume(route, job.command);
+          decisionFor(route, sourceCommand)?.consume(route, sourceCommand);
         mark.run(handled ? "done" : "ignored", job.id);
         return;
+      }
+      if (route.channel === "email" && route.projectGrant) {
+        // The incoming From header is not evidence of mailbox control. Confirm
+        // the original request before exposing a transcript, running Pi or
+        // changing its state. No project contents are sent in this challenge.
+        const proof = createEditApprovals();
+        dialogs.add(proof);
+        try {
+          if (
+            !(await grantedRequest(job, route, signal, proof)(
+              null,
+              null,
+              undefined,
+              true,
+            ))
+          ) {
+            if (!signal.aborted) mark.run("ignored", job.id);
+            return;
+          }
+        } finally {
+          dialogs.delete(proof);
+        }
       }
       if (job.command) {
         // The SDK has now verified the control body and native subthread. An
@@ -543,6 +680,10 @@ export function createGatewayRuntime(
         flush(file);
         flush(dir);
         transaction(() => {
+          if (route.channel === "slack" && route.projectGrant)
+            db.prepare(
+              "INSERT OR REPLACE INTO slack_session_generations VALUES(?,?)",
+            ).run(job.thread, route.generation);
           delivery.seen(notes);
           delete route.deliveryContext;
           const actor =
@@ -573,7 +714,7 @@ export function createGatewayRuntime(
       (projectGrantFor(route) !== route.projectGrant ||
         (reply !== sendReply &&
           route.channel !== "a2a" &&
-          !(await verifyProjectConversation(route, identity))))
+          !(await verifyProjectConversation(route, identity, client))))
     ) {
       mark.run("ignored", job.id);
       return;
@@ -683,11 +824,11 @@ export function createGatewayRuntime(
   // has a dedicated lane per thread; when two controls race they run in order.
   const ready =
     db.prepare(`SELECT j.rowid,j.* FROM jobs j WHERE j.state IN ('queued','reply','report') AND j.due<=?
-    AND NOT EXISTS(SELECT 1 FROM jobs earlier WHERE earlier.thread=j.thread AND earlier.state IN ${PENDING}
+    AND (j.command='/decision' OR NOT EXISTS(SELECT 1 FROM jobs earlier WHERE earlier.thread=j.thread AND earlier.state IN ${PENDING}
       AND ((j.command IS NOT NULL AND earlier.command IS NOT NULL AND earlier.rowid<j.rowid) OR
        (j.command IS NULL AND (earlier.command IS NOT NULL AND earlier.rowid<j.rowid OR
         earlier.command IS NULL AND (CASE WHEN j.sequence IS NOT NULL AND earlier.sequence IS NOT NULL AND j.sequence!=earlier.sequence
-          THEN earlier.sequence<j.sequence ELSE earlier.rowid<j.rowid END)))))
+          THEN earlier.sequence<j.sequence ELSE earlier.rowid<j.rowid END))))))
     ORDER BY j.command IS NULL, j.rowid`);
 
   function schedule() {
@@ -701,14 +842,19 @@ export function createGatewayRuntime(
       for (const job of ready.all(Date.now())) {
         if (active.has(job.id)) continue;
         const workers = [...active.values()];
+        const decision = job.command === "/decision";
         if (
-          workers.length >= CONCURRENCY + 1 ||
+          workers.length >= CONCURRENCY + (decision ? 2 : 1) ||
           (!job.command && workers.length >= CONCURRENCY)
         )
           continue;
         if (
           workers.some(
-            (w) => w.thread === job.thread && (!job.command || w.command),
+            (w) =>
+              w.thread === job.thread &&
+              (decision
+                ? w.command === "/decision"
+                : !job.command || w.command),
           )
         )
           continue;

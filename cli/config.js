@@ -1,3 +1,4 @@
+import { validateProjectConfig } from "../gateway/project-grants.js";
 import {
   mkdirSync,
   readFileSync,
@@ -189,6 +190,31 @@ export function loadConfig(env = process.env) {
     throw new Error("Choose auto or mention for groupReplyMode.");
   if (!["safe", "relaxed"].includes(companionResponseMode))
     throw new Error("Choose safe or relaxed for companionResponseMode.");
+  const readSetting =
+    env.INKBOX_PI_PROJECT_READ_WORKSPACE ??
+    (sameIdentity && saved.projectReadWorkspace) ??
+    false;
+  if (![true, false, "true", "false"].includes(readSetting))
+    throw new Error("Choose true or false for projectReadWorkspace.");
+  let testCommand = (sameIdentity && saved.projectTestCommand) || [];
+  if (env.INKBOX_PI_PROJECT_TEST_COMMAND !== undefined) {
+    try {
+      testCommand = JSON.parse(env.INKBOX_PI_PROJECT_TEST_COMMAND);
+    } catch {
+      throw new Error(
+        "INKBOX_PI_PROJECT_TEST_COMMAND must be a JSON argument array.",
+      );
+    }
+  }
+  const project = {
+    projectReadWorkspace: readSetting === true || readSetting === "true",
+    projectTestCommand: testCommand,
+    trustedConversations: listSetting(
+      "INKBOX_PI_TRUSTED_CONVERSATIONS",
+      "trustedConversations",
+    ),
+  };
+  validateProjectConfig(project);
   return {
     home,
     baseUrl,
@@ -198,10 +224,7 @@ export function loadConfig(env = process.env) {
     groupReplyMode,
     companionResponseMode,
     slackEnabled,
-    trustedConversations: listSetting(
-      "INKBOX_PI_TRUSTED_CONVERSATIONS",
-      "trustedConversations",
-    ),
+    ...project,
     trustedAgentIds: listSetting(
       "INKBOX_PI_TRUSTED_AGENT_IDS",
       "trustedAgentIds",

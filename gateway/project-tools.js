@@ -1,63 +1,106 @@
-import { constants } from "node:fs";
 import { open, realpath, rename, rm, stat } from "node:fs/promises";
-import { isAbsolute, join, dirname } from "node:path";
+import { join, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 
-import { encodeEditProposal, PROJECT_EDIT_TITLE } from "./pi-rpc.js";
+import { encodeEditProposal, PROJECT_EDIT_TITLE, encodeProjectAction, PROJECT_ACTION_TITLE } from "./pi-rpc.js";
+import { FILE_LIMIT as LIMIT, readableFiles, readProjectFile } from "./project-workspace.js";
 
-const LIMIT = 256 * 1024;
+
 const result = (text) => ({ content: [{ type: "text", text }], details: {} });
 
 export default function register(pi) {
   const files = JSON.parse(process.env.INKBOX_PI_GRANTED_FILES ?? "[]");
   const confirmEdits = process.env.INKBOX_PI_CONFIRM_EDITS === "1";
-  if (!Array.isArray(files) || !files.length) return;
-  async function readTarget(name) {
-    const root = await realpath(process.cwd());
-    if (
-      !files.includes(name) ||
-      isAbsolute(name) ||
-      name.split(/[\\/]/).some((part) => !part || part.startsWith("."))
-    ) {
-      throw new Error("Not a granted project file.");
-    }
-    const target = join(root, name);
-    if ((await realpath(target)) !== target)
-      throw new Error("Symbolic links cannot be used as project grants.");
-    const fd = await open(
-      target,
-      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
-    );
-    try {
-      const info = await fd.stat();
-      if (!info.isFile() || info.nlink !== 1 || info.size > LIMIT)
-        throw new Error("Expected one small regular text file.");
-      const bytes = await fd.readFile();
-      const text = new TextDecoder("utf-8", {
-        fatal: true,
-        ignoreBOM: true,
-      }).decode(bytes);
-      if (text.includes("\0")) throw new Error("Expected a text file.");
-      return { target, text, info };
-    } finally {
-      await fd.close();
-    }
-  }
+  const workspace = confirmEdits && process.env.INKBOX_PI_READ_WORKSPACE === "1";
+  if (!Array.isArray(files) || (!files.length && !confirmEdits)) return;
+  const granted = new Set(files);
+  const command = confirmEdits && JSON.parse(process.env.INKBOX_PI_TEST_ARGV || "null");
+  const inventory = (signal) => readableFiles(process.cwd(), granted, workspace, signal);
+  const readTarget = (name, permitted = granted) => readProjectFile(process.cwd(), name, permitted);
   const file = { type: "string", enum: files };
   pi.registerTool({
     name: "inkbox_project_read",
     label: "Read granted file",
-    description: "Read an owner-granted project file.",
+    description: "Read one project file from the owner-approved read scope.",
     parameters: {
       type: "object",
-      properties: { file },
+      properties: { file: workspace ? {type:"string"} : file },
       required: ["file"],
       additionalProperties: false,
     },
-    async execute(_, args) {
-      return result((await readTarget(args.file)).text);
+    async execute(_, args, signal) {
+      return result((await readTarget(args.file, await inventory(signal))).text);
     },
   });
+  if (confirmEdits) {
+    pi.registerTool({
+      name: "inkbox_project_search", label: "Search project files",
+      description: "Find literal text in owner-granted files and optional tracked source. Returns matching file names, line numbers and excerpts.",
+      parameters: {type:"object",properties:{query:{type:"string",minLength:1,maxLength:256}},required:["query"],additionalProperties:false},
+      async execute(_, {query}, signal) {
+        if (typeof query !== "string" || !query || query.length > 256)
+          throw new Error("Provide a short literal search string.");
+        const allowed = await inventory(signal);
+        const matches = [];
+        let bytes = 0, scanned = 0;
+        for (const name of allowed) {
+          signal?.throwIfAborted();
+          if (bytes >= 8 * 1024 * 1024 || scanned++ >= 512) {
+            matches.push("[Search stopped at scan limit.]");
+            break;
+          }
+          let text;
+          try { ({text} = await readTarget(name, allowed)); }
+          catch { continue; } // Missing, oversized, linked, binary, or unreadable.
+          bytes += Buffer.byteLength(text);
+          const lines = text.split("\n");
+          for (const [i, line] of lines.entries()) {
+            const at = line.indexOf(query);
+            if (at < 0) continue;
+            matches.push(name + ":" + (i + 1) + ": " + line.slice(Math.max(0, at - 60), at + query.length + 100));
+            if (matches.length >= 20) return result(matches.join("\n") + "\n[Result limit reached.]");
+          }
+        }
+        return result(matches.join("\n") || "No matches.");
+      },
+    });
+    const action = async (ctx, signal, request) => {
+      if (ctx?.mode !== "rpc") throw new Error("A verified gateway conversation is required.");
+      signal?.throwIfAborted();
+      const response = await ctx.ui.input(PROJECT_ACTION_TITLE, encodeProjectAction(request), {signal});
+      signal?.throwIfAborted();
+      if (typeof response !== "string" || !response)
+        throw new Error("No verified result; the request may have been denied, expired or undelivered.");
+      return response;
+    };
+    if (command) pi.registerTool({
+      name:"inkbox_project_test", label:"Run configured project test",
+      description:"Request approval from the sender to run the owner's configured test in an isolated workspace. No command arguments can be supplied.",
+      parameters:{type:"object",properties:{},additionalProperties:false},
+      async execute(_, _args, signal, _update, ctx) {
+        return result(await action(ctx, signal, {kind:"test",command}));
+      },
+    });
+    pi.registerTool({
+      name:"inkbox_project_ask", label:"Ask requester",
+      description:"Ask a clarifying question in this verified conversation and wait for the requester's answer.",
+      parameters:{type:"object",properties:{question:{type:"string"}},required:["question"],additionalProperties:false},
+      async execute(_, {question}, signal, _update, ctx) {
+        return result(await action(ctx, signal, {kind:"question",question}));
+      },
+    });
+    pi.registerTool({
+      name:"inkbox_project_email", label:"Email a project result",
+      description:"Request approval for the exact recipient, subject and plain-text email body, then send through the gateway.",
+      parameters:{type:"object",properties:{recipient:{type:"string"},subject:{type:"string"},body:{type:"string"}},required:["recipient","subject","body"],additionalProperties:false},
+      async execute(_, {recipient,subject,body}, signal, _update, ctx) {
+        const response = await action(ctx, signal, {kind:"email",recipient,subject,body});
+        if (response !== "sent") throw new Error("Email delivery was not confirmed.");
+        return result("Email sent.");
+      },
+    });
+  }
+  if (!files.length) return;
   pi.registerTool({
     name: "inkbox_project_replace",
     label: "Edit granted file",
