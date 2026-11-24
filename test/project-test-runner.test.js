@@ -25,6 +25,21 @@ async function checkout(t) {
   return dir;
 }
 
+test("workspace reads outside a Git checkout retain only explicit grants", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "pi-untracked-project-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await writeFile(join(dir, "named.md"), "granted");
+  await writeFile(join(dir, "other.js"), "not granted");
+  assert.deepEqual(
+    [...(await readableFiles(dir, ["named.md"], true))],
+    ["named.md"],
+  );
+  await assert.rejects(
+    readableFiles(dir, [], true),
+    /requires a Git checkout or explicitly granted project files/,
+  );
+});
+
 test("workspace reads/search candidates exclude untracked and sensitive paths; symlinks cannot resolve grants elsewhere", async (t) => {
   const dir = await checkout(t);
   for (const name of [

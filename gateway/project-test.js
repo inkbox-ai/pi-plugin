@@ -264,7 +264,7 @@ export async function runProjectTest(config, signal) {
       finish();
       reject(err);
     });
-    child.once("exit", () => {
+    child.once("close", () => {
       finish();
       if (signal.aborted) reject(signal.reason);
       else if (typeof result?.text === "string") resolve(result.text);

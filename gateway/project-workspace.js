@@ -49,34 +49,52 @@ function sourceFile(name) {
 }
 
 export async function readableFiles(root, granted, workspace, signal) {
-  if (!workspace) return new Set(granted);
-  // Ignore global Git configuration and never invoke repository hooks or filters.
-  const { stdout } = await git(
-    "/usr/bin/git",
-    [
-      "--no-optional-locks",
-      "-c",
-      "core.fsmonitor=false",
-      "ls-files",
-      "--stage",
-      "-z",
-      "--",
-      ".",
-    ],
-    {
-      cwd: root,
-      env: {
-        PATH: "/usr/bin:/bin",
-        GIT_CONFIG_NOSYSTEM: "1",
-        GIT_CONFIG_GLOBAL: "/dev/null",
-      },
-      timeout: 5_000,
-      maxBuffer: 4 * 1024 * 1024,
-      signal,
-    },
-  );
   const files = new Set(granted);
-  for (const entry of stdout.split("\0")) {
+  if (!workspace) return files;
+  const directory = await realpath(root);
+  // Ignore global Git configuration and never invoke repository hooks or filters.
+  let index;
+  try {
+    ({ stdout: index } = await git(
+      "/usr/bin/git",
+      [
+        "--no-optional-locks",
+        "-c",
+        "safe.directory=" + directory,
+        "-c",
+        "core.fsmonitor=false",
+        "ls-files",
+        "--stage",
+        "-z",
+        "--",
+        ".",
+      ],
+      {
+        cwd: directory,
+        env: {
+          PATH: "/usr/bin:/bin",
+          LC_ALL: "C",
+          GIT_CONFIG_NOSYSTEM: "1",
+          GIT_CONFIG_GLOBAL: "/dev/null",
+        },
+        timeout: 5_000,
+        maxBuffer: 4 * 1024 * 1024,
+        signal,
+      },
+    ));
+  } catch (error) {
+    if (
+      error.code !== "ENOENT" &&
+      !(error.code === 128 && error.stderr?.includes("not a git repository"))
+    )
+      throw error;
+    if (files.size) return files;
+    throw new Error(
+      "Workspace access requires a Git checkout or explicitly granted project files.",
+      { cause: error },
+    );
+  }
+  for (const entry of index.split("\0")) {
     // Exclude tracked symlinks, submodules and conflicted index entries.
     const match = /^100(?:644|755) [a-f0-9]+ 0\t(.+)$/u.exec(entry);
     if (match && sourceFile(match[1])) files.add(match[1]);
