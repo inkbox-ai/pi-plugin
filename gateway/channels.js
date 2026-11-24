@@ -727,13 +727,18 @@ export async function sendReply(route, text, idempotencyKey, client, identity) {
       return identity.sendIMessage({
         ...(route.projectGrant ? { plainReplyFallback: false } : {}),
         conversationId: route.conversation,
-        ...(route.subthread ? { replyToMessageId: route.message } : {}),
+        ...(route.subthread || (route.projectGrant && route.editApprovalPrompt)
+          ? { replyToMessageId: route.message }
+          : {}),
         text,
         idempotencyKey,
       });
     case "whatsapp":
       return identity.sendWhatsApp({
         conversationId: route.conversation,
+        ...(route.projectGrant && (route.subthread || route.editApprovalPrompt)
+          ? { replyToMessageId: route.message, plainReplyFallback: false }
+          : {}),
         text,
         idempotencyKey,
       });

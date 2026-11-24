@@ -7,16 +7,26 @@ export const isEditControl = (text) => /^\/(approve|deny)(?:\s|$)/i.test(text);
 
 // Project turns are serialized. The sole pending decision belongs to one live
 // turn, never the persistent session. A restart cannot reissue or consume it.
+const DECISION_WINDOW_MS = 120_000;
+
 export function createEditApprovals() {
   let pending;
 
   function matches(route, command) {
     return Boolean(
       pending &&
-        !pending.signal.aborted &&
+        pending.live() &&
         !pending.consumed &&
         route.projectGrant === pending.route.projectGrant &&
-        route.thread === pending.route.thread &&
+        route.channel === pending.route.channel &&
+        route.conversation === pending.route.conversation &&
+        route.assignment === pending.route.assignment &&
+        (route.thread === pending.route.thread ||
+          // A phone's native Reply action can create a subthread when the
+          // original message was top-level. Only these two roots belong to it.
+          (route.subthread &&
+            (route.subthread === pending.route.message ||
+              route.subthread === pending.promptId))) &&
         route.sender === pending.route.sender &&
         (command === pending.approve || command === pending.deny),
     );
@@ -44,13 +54,18 @@ export function createEditApprovals() {
       const deny = "/deny " + code;
       const decision = Promise.withResolvers();
       const result = Promise.withResolvers();
-      const lifetime = AbortSignal.any([signal, AbortSignal.timeout(120_000)]);
+      const deadline = performance.now() + DECISION_WINDOW_MS;
+      const lifetime = AbortSignal.any([
+        signal,
+        AbortSignal.timeout(DECISION_WINDOW_MS),
+      ]);
+      const live = () => !lifetime.aborted && performance.now() < deadline;
       const request = {
         route,
         approve,
         deny,
         decision,
-        signal: lifetime,
+        live,
         consumed: false,
         rejectEdit: () => result.resolve(false),
       };
@@ -70,18 +85,19 @@ export function createEditApprovals() {
         "\nor\n" +
         deny;
       void (async () => {
-        if (!(await verify(route)) || lifetime.aborted) return false;
+        if (!(await verify(route)) || !live()) return false;
         const sent = await send(prompt, code);
-        if (sent?.skipped || lifetime.aborted) return false;
+        if (sent?.skipped || !live()) return false;
+        request.promptId = sent?.id;
         const response = await decision.promise;
-        if (!response || lifetime.aborted) return false;
+        if (!response || !live()) return false;
         // Both the request and the decision must still refer to their original
         // Inkbox sources and audience when the result is released to Pi.
         return (
           (await verify(route)) &&
-          !lifetime.aborted &&
+          live() &&
           (await verify(response, approve)) &&
-          !lifetime.aborted
+          live()
         );
       })().then(result.resolve, () => result.resolve(false));
       try {

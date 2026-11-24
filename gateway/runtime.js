@@ -344,7 +344,7 @@ export function createGatewayRuntime(
         },
         send: (prompt, code) =>
           reply(
-            { ...route },
+            { ...route, editApprovalPrompt: true },
             prompt,
             digest(job.id, "edit-approval", code),
             client,

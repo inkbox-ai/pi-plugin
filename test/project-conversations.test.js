@@ -153,6 +153,53 @@ test("WhatsApp also verifies the actual identity, currently assigned line and di
   }
 });
 
+test("trusted phone approval prompts and project subthreads use a strict native reply anchor", async () => {
+  for (const channel of ["imessage", "whatsapp"]) {
+    const { identity, source, destination } = resources();
+    const metadata = {
+      agentIdentityId: identity.id,
+      localNumber: own,
+      unresolvedParticipantCount: 0,
+    };
+    identity.whatsappNumber = own;
+    identity.getWhatsAppMessage = async () => ({
+      ...source,
+      ...metadata,
+      senderAccess: "direct",
+    });
+    identity.getWhatsAppConversation = async () => ({
+      ...destination,
+      ...metadata,
+    });
+    const sent = [];
+    identity.sendIMessage = identity.sendWhatsApp = async (options) =>
+      sent.push(options);
+    const trusted = { ...route, channel, projectGrant: "granted" };
+    await sendReply(
+      { ...trusted, editApprovalPrompt: true },
+      "review",
+      "approval",
+      {},
+      identity,
+    );
+    await sendReply(trusted, "ordinary answer", "answer", {}, identity);
+    source.threadRootMessageId = "root";
+    await sendReply(
+      { ...trusted, subthread: "root" },
+      "thread answer",
+      "thread",
+      {},
+      identity,
+    );
+    for (const options of [sent[0], sent[2]]) {
+      assert.equal(options.conversationId, route.conversation);
+      assert.equal(options.replyToMessageId, route.message);
+      assert.equal(options.plainReplyFallback, false);
+    }
+    assert.equal(sent[1].replyToMessageId, undefined);
+  }
+});
+
 test("trusted sessions survive restart but revocation suppresses saved replies and re-grant starts clean", async (t) => {
   const home = await mkdtemp(join(tmpdir(), "inkbox-pi-project-"));
   const { identity, source } = resources();

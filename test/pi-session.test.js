@@ -370,11 +370,12 @@ test(
       { client: {}, identity },
     );
 
-    function submit(id, chat, text) {
+    function submit(id, chat, text, threadRoot) {
       const peer = peers[chat];
       sources.set(id, {
         id,
         conversationId: chat,
+        threadRootMessageId: threadRoot,
         direction: "inbound",
         service: "imessage",
         isGroup: false,
@@ -391,6 +392,7 @@ test(
           message: {
             id,
             conversation_id: chat,
+            thread_root_message_id: threadRoot,
             remote_number: peer,
             direction: "inbound",
             sender_access: "direct",
@@ -410,6 +412,7 @@ test(
     await until(() => replies.length > 0, "Pi did not request approval");
     assert.equal(replies[0].conversationId, "owners-chat");
     assert.equal(replies[0].plainReplyFallback, false);
+    assert.equal(replies[0].replyToMessageId, "edit");
     assert.match(replies[0].text, /project\.txt/);
     assert.match(replies[0].text, /draft/);
     assert.match(replies[0].text, /ready/);
@@ -440,7 +443,10 @@ test(
     assert.equal(runtime.eventState("stale"), "unknown");
     assert.equal(readFileSync(filePath, "utf8"), "Status: draft\n");
     assert.equal(modelRequests.length, 1);
-    assert.equal(submit("approved", "owners-chat", approval[0]), "accepted");
+    assert.equal(
+      submit("approved", "owners-chat", approval[0], "edit"),
+      "accepted",
+    );
     await until(
       () => runtime.eventState("edit") === "done",
       "The approved Pi turn never completed",
@@ -454,6 +460,7 @@ test(
     assert.ok(toolResult, "Pi must have executed the real tool");
     assert.equal(toolResult.tool_call_id, "call_replace");
     assert.match(JSON.stringify(toolResult.content), /File updated\./);
+    assert.notEqual(replies[0].idempotencyKey, replies[1].idempotencyKey);
     assert.deepEqual(
       replies.map(({ conversationId, text }) => [conversationId, text]),
       [
