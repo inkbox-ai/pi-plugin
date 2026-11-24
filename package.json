@@ -1,0 +1,59 @@
+{
+  "name": "@inkbox/pi-plugin",
+  "version": "0.7.42",
+  "description": "Give your Pi agent an Inkbox identity for email and messaging.",
+  "type": "module",
+  "license": "MIT",
+  "repository": "github:inkbox-ai/pi-plugin",
+  "homepage": "https://github.com/inkbox-ai/pi-plugin#readme",
+  "keywords": [
+    "pi-package",
+    "inkbox",
+    "email",
+    "messaging"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "exports": {
+    "./runtime": "./gateway/index.js"
+  },
+  "bin": {
+    "inkbox-pi": "./bin/inkbox-pi.js"
+  },
+  "pi": {
+    "extensions": [
+      "./extension/index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "files": [
+    "bin",
+    "cli",
+    "extension",
+    "gateway",
+    "skills",
+    "install.sh",
+    "CHANGELOG.md"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "scripts": {
+    "test": "node --import tsx --test test/*.test.*"
+  },
+  "dependencies": {
+    "@inkbox/sdk": "0.7.42",
+    "zod": "^4.1.8"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "1.6.0",
+    "tsx": "^4.20.0"
+  }
+}
