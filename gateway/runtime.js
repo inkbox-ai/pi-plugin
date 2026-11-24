@@ -627,7 +627,7 @@ export function createGatewayRuntime(
         for (const work of active.values()) work.controller.abort();
         closeTask = Promise.allSettled(
           [...active.values()].map((work) => work.promise),
-        ).finally(() => {
+        ).then(() => {
           db.close();
           owner.close();
         });

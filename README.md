@@ -68,19 +68,32 @@ For unattended setup with an existing identity, pass its key through stdin rathe
 
     inkbox-pi bootstrap --identity my-agent --api-key-stdin --project-dir "$PWD"
 
+### Incoming attachments and voice notes
+
+Pi receives the caption and bounded file descriptions, not arbitrary attachment URLs or binary content. For messaging audio, the gateway includes available automatic transcripts and waits up to a minute for a pending transcript. Completion notifications only prompt a read of the original message; they never start another turn or supply project permissions. An unavailable transcript is labeled as such. Only the original message text can address a group or invoke a control, not a filename or transcript. Project-authorized turns use the verified message text rather than attachment instructions.
+
 ## Updating and removing
 
 For an npm installation, run `pi update --extensions`, use `/reload` in an open Pi session, then run `inkbox-pi restart` if the gateway is in use. For a source checkout, update the checkout and run `npm ci` before reloading and restarting. Use the path from `/inkbox` if you do not have the launcher on PATH.
 
 Before removing the package, run `inkbox-pi uninstall` to stop and remove the background service. Then run `pi remove npm:@inkbox/pi-plugin` (or pass the original source path for a local install) and `/reload`. This preserves your profile and conversation history. If you used `install.sh`, you can also remove its `inkbox-pi` symlink from your bin directory.
 
-### Incoming attachments and voice notes
-
-Pi receives the caption and bounded file descriptions, not arbitrary attachment URLs or binary content. For messaging audio, the gateway includes available automatic transcripts and waits up to a minute for a pending transcript. Completion notifications only prompt a read of the original message; they never start another turn or supply project permissions. An unavailable transcript is labeled as such. Only the original message text can address a group or invoke a control, not a filename or transcript. Project-authorized turns use the verified message text rather than attachment instructions.
-
 ## Embedding
 
 Import `createGatewayRuntime` from `@inkbox/pi-plugin/runtime` when your application owns event delivery and process supervision. Pass an initialized SDK client, its verified identity, and a persistent state directory. The runtime accepts **already verified** events; it is not a raw HTTP endpoint. To run the HTTP listener, signature verification, subscriptions and tunnel together, use `startGateway` instead. Don't run two owners against one profile.
+
+For example, with an existing verified SDK identity and client:
+
+```ts
+import { createGatewayRuntime } from "@inkbox/pi-plugin/runtime";
+
+const runtime = createGatewayRuntime(
+  { home: stateDirectory, baseUrl: apiOrigin, projectDirectory },
+  { client, identity },
+);
+// Inside the listener, after verifying the signature of the raw request:
+runtime.acceptVerified(event);
+```
 
 Call `runtime.acceptVerified(event)` to admit an event, then inspect `runtime.eventState(event.id)` to distinguish queued work from a delivered reply or a failure. Admission alone is not a delivery receipt. If a job fails, `runtime.lastFailure(event.id)` returns its most recent sanitized failure category and attempt number. Watch `runtime.failed` for a fatal runtime error and await `runtime.close()` on shutdown.
 

@@ -39,6 +39,7 @@ try {
     ...manifest.pi.extensions,
     ...Object.values(manifest.bin),
     manifest.exports["./runtime"],
+    "./gateway/index.d.ts",
   ]) {
     if (!files.has(required.replace(/^\.\//, "")))
       throw new Error("Missing package file: " + required);
