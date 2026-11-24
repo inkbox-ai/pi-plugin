@@ -18,11 +18,13 @@ You need Node.js 22.19 or newer, [Pi](https://pi.dev/) on your PATH, and a model
 
 Start Pi or run `/reload`. Use `/inkbox` to see the setup and gateway commands **for that installation**; Pi's package directory does not need to be on your shell PATH. Use `/inkbox-status` to see the active profile and available tools. If you installed a shell launcher, the same commands are available as `inkbox-pi`.
 
+To replace a revoked key for the same identity, run `inkbox-pi setup --replace-key`; the masked prompt verifies the replacement before saving it.
+
 Setup connects an existing agent or guides you through signup and verification. It can also configure iMessage and an optional dedicated SMS number. An SMS recipient may need to text START first. Phone and realtime voice calls are not included.
 
 ## Using the extension
 
-Try “Show my Inkbox identity,” “List my unread emails,” or “Send a text to this number.” Tools use your configured identity; outbound messaging asks for confirmation by default.
+Try “Show my Inkbox identity,” “List my unread emails,” or “Send a text to this number.” Tools use your configured identity; outbound messaging asks for confirmation by default. Without an interactive approval UI, an operation that requires confirmation is denied. This interactive tool policy is separate from the gateway replying to an admitted inbound message.
 
 | Capability | Examples |
 |---|---|
@@ -37,7 +39,7 @@ The local profile is stored under `~/.inkbox-pi` (override with `INKBOX_PI_HOME`
 
 ## Running the gateway
 
-Configure model access in Pi itself before starting a background service. The gateway listens for signed Inkbox events and starts Pi turns independently of the interactive terminal. It saves conversation history locally and routes the reply to the originating conversation. Incoming messages are not permission to use the interactive session's tools or credentials.
+Configure model access in Pi itself before starting a background service. The gateway listens for signed Inkbox events and starts Pi turns independently of the interactive terminal. Startup and `inkbox-pi doctor` check for a selected model and configured credentials without sending a model prompt. Replies that exceed the messaging channel’s limit are explicitly shortened; the complete answer remains in local Pi history. It saves conversation history locally and routes the reply to the originating conversation. Incoming messages are not permission to use the interactive session's tools or credentials.
 
 | Command | Purpose |
 |---|---|
@@ -49,21 +51,38 @@ Configure model access in Pi itself before starting a background service. The ga
 
 By default the gateway uses an Inkbox tunnel. To supply your own HTTPS endpoint, set `INKBOX_PI_PUBLIC_URL` and a fixed `INKBOX_PI_PORT` and forward `/webhook` to that port. Set `INKBOX_PI_ALLOWED_SENDERS` to a comma-separated list to narrow inbound senders. Keep your signing key private; rotating it replaces the key for the identity, not just for this installation.
 
+Slack gateway replies are opt-in for a connected identity. Set `INKBOX_SLACK_ENABLED=true` (or `slackEnabled: true` in the profile), then restart. With Slack off, even old subscriptions cannot wake Pi.
+
 In a direct conversation, send `/status` for work status, `/stop` or `/cancel` to stop work, or `/new` or `/clear` to start a fresh session. These are messages to the gateway, not commands to type at a shell. Use `INKBOX_GROUP_REPLY_MODE=mention` to limit ordinary group wake-ups to messages addressing the agent.
 
 If your model credential exists only in a shell variable, set `INKBOX_PI_MODEL_ENV` to the **name** of the supported credential variable before installing or starting the service. The value is kept in the private service profile, not in the service definition. This isn't necessary when Pi already has a saved login.
 
-By default incoming turns cannot read or edit project files. For a trusted agent-to-agent caller, the owner can set both `INKBOX_PI_TRUSTED_AGENT_IDS` (exact identity IDs) and `INKBOX_PI_PROJECT_FILES` (exact existing file paths relative to the project). This grants bounded read/replace tools for those files, not a general-purpose shell.
+Incoming turns cannot read or edit project files by default. To grant bounded read/replace access, set `INKBOX_PI_PROJECT_FILES` to comma-separated, existing paths relative to the project, then grant either:
+
+- An agent-to-agent caller: set `INKBOX_PI_TRUSTED_AGENT_IDS` to exact Inkbox identity IDs.
+- A one-to-one native iMessage or WhatsApp conversation: set `INKBOX_PI_TRUSTED_CONVERSATIONS` to comma-separated `channel:conversation-id:sender-number` bindings (for example, `imessage:YOUR-CONVERSATION-ID:+12025550123`). Use the Inkbox conversation ID and the peer's full international number, not a display name. The gateway checks the identity-owned inbound message and current destination before running Pi and again before sending.
+
+Restart the gateway after changing grants. Removing a grant or changing its file list prevents reuse of the old privileged session and suppresses its pending replies. Groups, Companion turns, SMS (including downgraded iMessage), and email never receive project tools. A grant does not enable a shell or other Pi tools.
 
 For unattended setup with an existing identity, pass its key through stdin rather than a command-line argument:
 
     inkbox-pi bootstrap --identity my-agent --api-key-stdin --project-dir "$PWD"
 
+## Updating and removing
+
+For an npm installation, run `pi update --extensions`, use `/reload` in an open Pi session, then run `inkbox-pi restart` if the gateway is in use. For a source checkout, update the checkout and run `npm ci` before reloading and restarting. Use the path from `/inkbox` if you do not have the launcher on PATH.
+
+Before removing the package, run `inkbox-pi uninstall` to stop and remove the background service. Then run `pi remove npm:@inkbox/pi-plugin` (or pass the original source path for a local install) and `/reload`. This preserves your profile and conversation history. If you used `install.sh`, you can also remove its `inkbox-pi` symlink from your bin directory.
+
+### Incoming attachments and voice notes
+
+Pi receives the caption and bounded file descriptions, not arbitrary attachment URLs or binary content. For messaging audio, the gateway includes available automatic transcripts and waits up to a minute for a pending transcript. Completion notifications only prompt a read of the original message; they never start another turn or supply project permissions. An unavailable transcript is labeled as such. Only the original message text can address a group or invoke a control, not a filename or transcript. Project-authorized turns use the verified message text rather than attachment instructions.
+
 ## Embedding
 
 Import `createGatewayRuntime` from `@inkbox/pi-plugin/runtime` when your application owns event delivery and process supervision. Pass an initialized SDK client, its verified identity, and a persistent state directory. The runtime accepts **already verified** events; it is not a raw HTTP endpoint. To run the HTTP listener, signature verification, subscriptions and tunnel together, use `startGateway` instead. Don't run two owners against one profile.
 
-Call `runtime.acceptVerified(event)` to admit an event, then inspect `runtime.eventState(event.id)` to distinguish queued work from a delivered reply or a failure. Admission alone is not a delivery receipt. Watch `runtime.failed` for a fatal runtime error and await `runtime.close()` on shutdown.
+Call `runtime.acceptVerified(event)` to admit an event, then inspect `runtime.eventState(event.id)` to distinguish queued work from a delivered reply or a failure. Admission alone is not a delivery receipt. If a job fails, `runtime.lastFailure(event.id)` returns its most recent sanitized failure category and attempt number. Watch `runtime.failed` for a fatal runtime error and await `runtime.close()` on shutdown.
 
 A signed `inbound.received` event with an agent handler runs in a session dedicated to its source. If `INKBOX_PI_ALLOWED_SENDERS` is set, include the source ID to accept its events. Request bodies up to 64 KiB are passed as data; a completed analysis is available through `runtime.eventResult(event.id)`, not sent to the requester. Script handlers are not executed. Unsupported handlers and exhausted processing retries are reported against the originating delivery.
 

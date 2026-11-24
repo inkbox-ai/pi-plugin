@@ -8,10 +8,11 @@ import { modelEnvironment } from "./model-env.js";
 import { prompts } from "./prompts.js";
 import { service, serviceStatus } from "./service.js";
 import { problem } from "./errors.js";
+import { checkPiModel } from "../gateway/preflight.js";
 
 const HELP = `inkbox-pi — Inkbox for the Pi coding agent
 
-  setup [--print]     Connect or create an identity and configure the gateway
+  setup [--print | --replace-key]     Connect or create an identity and configure the gateway
   bootstrap --identity HANDLE [--base-url URL] [--project-dir DIR]
             [--api-key-stdin] [--rotate-signing-key] [--start-gateway]
   whoami              Show the connected identity and channel addresses
@@ -59,6 +60,11 @@ function printIdentity(id) {
 async function doctor(config) {
   const version = hostVersion(config);
   console.log("Pi: " + (version || "not available (check INKBOX_PI_BIN and PATH)"));
+  let modelReady = false;
+  if (version) {
+    try { await checkPiModel(config); modelReady = true; console.log("Pi model: configured"); }
+    catch (error) { console.log("Pi model: " + (error.operatorMessage || "not available")); }
+  }
   if (!config.apiKey) { console.log("Identity: missing API key; run inkbox-pi setup"); return 1; }
   const identity = await verifiedIdentity(createClient(config.apiKey, config.baseUrl), config.identity);
   printIdentity(identity);
@@ -71,7 +77,7 @@ async function doctor(config) {
   if (process.platform === "linux" || process.platform === "darwin") {
     console.log("Background gateway: " + JSON.stringify(serviceStatus(config)));
   }
-  return version && ready ? 0 : 1;
+  return version && modelReady && ready ? 0 : 1;
 }
 
 async function foreground(config, managed) {
@@ -128,7 +134,7 @@ export async function main(argv) {
     const schema = command === "bootstrap" ? {
       identity: { type: "string" }, "base-url": { type: "string" }, "project-dir": { type: "string" },
       "api-key-stdin": { type: "boolean" }, "rotate-signing-key": { type: "boolean" }, "start-gateway": { type: "boolean" },
-    } : { print: { type: "boolean" } };
+    } : { print: { type: "boolean" }, "replace-key": { type: "boolean" } };
     const { values } = parseArgs({ args, options: schema });
     if (command === "setup" && (values.print || !process.stdin.isTTY || !process.stdout.isTTY)) {
       console.log(CHECKLIST);
@@ -140,7 +146,7 @@ export async function main(argv) {
         identity: values.identity, baseUrl: values["base-url"], projectDir: values["project-dir"],
         key: values["api-key-stdin"] ? await readKey() : process.env.INKBOX_API_KEY,
         signingKey: process.env.INKBOX_SIGNING_KEY,
-        rotate: values["rotate-signing-key"],
+        rotate: values["rotate-signing-key"], replaceKey: values["replace-key"],
       }, io);
       if (!selected.ready) {
         console.log(JSON.stringify({ status: "requires_human", identity: selected.identity, action: "Provide the existing INKBOX_SIGNING_KEY or use bootstrap --rotate-signing-key to replace it." }));

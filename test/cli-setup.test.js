@@ -94,3 +94,19 @@ test("bootstrap cannot restamp a locally saved signing key after server rotation
   assert.equal(JSON.parse(completed.stdout).status, "configured");
   assert.equal(readProfile(home).signingKey, "replacement");
 });
+
+test("replacing a revoked key is masked and leaves the saved profile untouched until verified", async t => {
+  const { home, config, clientFor } = fixture(t);
+  const existing = { baseUrl: config.baseUrl, identity: "pi-example", apiKey: "revoked" };
+  saveProfile(home, existing);
+  const io = { secret: async () => "wrong", confirm: async () => false, print() {} };
+  const options = {replaceKey:true, projectDir:home};
+  const current = loadConfig({ HOME:home, INKBOX_PI_HOME:home });
+  await assert.rejects(configure(current, options, io, () => ({
+    async whoami() { throw Object.assign(new Error("private"), {statusCode:401}); },
+  })));
+  assert.deepEqual(readProfile(home), existing);
+  io.secret = async () => "new-scoped";
+  assert.equal((await configure(current, options, io, clientFor)).ready, true);
+  assert.equal(readProfile(home).apiKey, "new-scoped");
+});

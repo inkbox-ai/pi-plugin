@@ -3,4 +3,10 @@ name: inkbox-notes-memory
 description: Find, create, and update durable Inkbox notes.
 ---
 
-Search or list existing notes before creating one. Use `inkbox_get_note` to read the current contents before updating. Store durable facts the user actually wants remembered, not message text by default. Do not save access keys, passwords, or ambiguous guesses.
+**Distinguish an Inkbox note from a workspace file or a contact.** Use notes when the user asks for persistent Inkbox memory. Use a contact record for names and address-book details.
+
+- To find an existing note, use `inkbox_list_notes` with a focused `q` (searches title and body). If multiple results are plausible, show the titles rather than editing the first hit.
+- For a new note, use `inkbox_create_note` with a nonempty `body` and optional `title`. Store the facts the user wants remembered, not the whole conversation. Return the note’s title and ID.
+- For an edit, fetch the current contents with `inkbox_get_note` first. Submit the revised body to `inkbox_update_note`, preserving unrelated text. For deletion, use the exact selected note ID. Updates and deletions are opt-in; if disabled, do not create a competing copy to approximate the edit.
+
+Search results depend on which notes this identity can access. Not finding a note does not establish that another identity deleted it.

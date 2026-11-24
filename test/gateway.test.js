@@ -13,6 +13,14 @@ const identity = {
   id: "agent-test",
   phoneNumber: { number: "+12025550101" },
   imessageEnabled: true,
+  async listTextConversations() {
+    return ["thread-a", "thread-b"].map((id) => ({
+      id,
+      isGroup: false,
+      remotePhoneNumber: "+12025550102",
+      participants: ["+12025550102"],
+    }));
+  },
 };
 const sms = (id, text = "Hi", conversation = "thread-a") => ({
   id: "evt-" + id,
@@ -139,6 +147,7 @@ test("reply routing is bound to the inbound group, never model-supplied destinat
     "stable",
     {},
     {
+      ...identity,
       async sendText(args) {
         sent = args;
       },
@@ -188,8 +197,8 @@ test(
   async () => {
     const home = await mkdtemp(join(tmpdir(), "inkbox-pi-"));
     const started = Promise.withResolvers();
-    const otherReply = Promise.withResolvers(),
-      ownerReply = Promise.withResolvers();
+    const ownerReply = Promise.withResolvers();
+    let otherReplies = 0;
     const prompts = [];
     const runtime = createGatewayRuntime(
       { home },
@@ -208,7 +217,7 @@ test(
           );
         },
         async reply(route, answer) {
-          if (route.message === "other") otherReply.resolve(answer);
+          if (route.message === "other") otherReplies++;
           if (route.message === "owner") ownerReply.resolve(answer);
         },
       },
@@ -219,7 +228,11 @@ test(
       const other = sms("other", "/stop");
       other.data.text_message.sender_phone_number = "+12025550109";
       runtime.acceptVerified(other);
-      assert.match(await otherReply.promise, /another sender/);
+      while (runtime.eventState("evt-other") === "queued")
+        await new Promise((r) => setTimeout(r, 5));
+      assert.equal(runtime.eventState("evt-other"), "ignored");
+      assert.equal(otherReplies, 0);
+      assert.notEqual(runtime.eventState("evt-first"), "canceled");
       runtime.acceptVerified(sms("owner", "/cancel"));
       assert.match(await ownerReply.promise, /Stopped/);
       assert.equal(runtime.eventState("evt-first"), "canceled");
@@ -421,3 +434,66 @@ test(
     }
   },
 );
+
+test(
+  "SMS controls are ignored after hydration identifies a group MMS",
+  { timeout: 5000 },
+  async () => {
+    const home = await mkdtemp(join(tmpdir(), "inkbox-pi-"));
+    let prompts = 0,
+      replies = 0;
+    const runtime = createGatewayRuntime(
+      { home },
+      {
+        client: {},
+        identity: {
+          ...identity,
+          async listTextConversations() {
+            return [
+              {
+                id: "thread-a",
+                isGroup: true,
+                participants: ["+12025550102", "+12025550109"],
+              },
+            ];
+          },
+        },
+        async turn() {
+          prompts++;
+          throw new Error("Group control must not wake Pi");
+        },
+        async reply() {
+          replies++;
+        },
+      },
+    );
+    try {
+      const evt = sms("group-control", "/clear");
+      evt.data.text_message.recipients = null;
+      assert.equal(runtime.acceptVerified(evt), "accepted");
+      while (runtime.eventState(evt.id) === "queued")
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      assert.equal(runtime.eventState(evt.id), "ignored");
+      assert.equal(prompts, 0);
+      assert.equal(replies, 0);
+    } finally {
+      await runtime.close();
+      await rm(home, { recursive: true, force: true });
+    }
+  },
+);
+
+test("narrowing the sender policy stops work that was queued before restart", async t => {
+  const home = await mkdtemp(join(tmpdir(), "pi-revoke-sender-"));
+  let runtime;
+  t.after(async () => { await runtime?.close(); await rm(home, {recursive:true, force:true}); });
+  const config = {home, baseUrl:"https://example.com"};
+  const deps = {identity, client:{}, turn:() => assert.fail("revoked sender ran Pi")};
+  runtime = createGatewayRuntime(config, deps);
+  assert.equal(runtime.acceptVerified(sms("pending")), "accepted");
+  await runtime.close();
+  runtime = createGatewayRuntime({...config, allowedSenders:["+12025550999"]}, deps);
+  for (let i = 0; i < 100 && runtime.eventState("evt-pending") !== "ignored"; i++)
+    await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(runtime.eventState("evt-pending"), "ignored");
+});

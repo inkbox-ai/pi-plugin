@@ -10,6 +10,7 @@ import { loadConfig, saveProfile, readProfile } from "./config.js";
 
 import { modelEnvironment } from "./model-env.js";
 
+const packageVersion = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 const entry = fileURLToPath(new URL("../bin/inkbox-pi.js", import.meta.url));
 
 const xml = value => value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
@@ -104,7 +105,7 @@ function saveServiceSettings(config) {
     overrides, profileIdentity: baseline.identity, profileOrigin: baseline.baseUrl,
     path: process.env.PATH, agentDir: process.env.PI_CODING_AGENT_DIR,
   };
-  const fingerprint = createHash("sha256").update(JSON.stringify([config, settings, process.execPath, entry])).digest("hex");
+  const fingerprint = createHash("sha256").update(JSON.stringify([config, settings, process.execPath, entry, packageVersion])).digest("hex");
   saveProfile(serviceDir, { ...settings, fingerprint });
   return fingerprint;
 }

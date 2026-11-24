@@ -11,6 +11,15 @@ const id = {
   id: "identity",
   agentHandle: "tester",
   phoneNumber: { number: "+12025550111" },
+  async listTextConversations() {
+    return [
+      {
+        id: "conversation",
+        isGroup: true,
+        participants: ["+12025550122", "+12025550133"],
+      },
+    ];
+  },
 };
 function sms(text, phase = "initialization", activation = "group-A") {
   return {
@@ -82,7 +91,7 @@ test("Companion snapshots, sponsorship, session isolation and send-time revocati
     false,
   );
 });
-test("mention mode ignores historical text, URLs and lookalikes", () => {
+test("mention mode ignores historical text, URLs and lookalikes", async () => {
   for (const text of [
     "email@example.com",
     "hey @tester-long",
@@ -90,13 +99,18 @@ test("mention mode ignores historical text, URLs and lookalikes", () => {
   ]) {
     const event = sms(text);
     event.companion.history = [{ text: "@tester" }];
-    assert.equal(
-      parseRoute(event, id, [], { groupReplyMode: "mention" }),
-      null,
-    );
+    const route = parseRoute(event, id, [], { groupReplyMode: "mention" });
+    assert.equal(await beforeTurn(route, {}, id), false);
   }
+  const addressed = parseRoute(sms("Hey @tester!"), id, [], {
+    groupReplyMode: "mention",
+  });
   assert(
-    parseRoute(sms("Hey @tester!"), id, [], { groupReplyMode: "mention" }),
+    await beforeTurn(
+      addressed,
+      { companion: { loadInitialization: async () => snapshot(addressed) } },
+      id,
+    ),
   );
   const event = sms("@tester");
   event.companion.conversation_id = "another";
@@ -163,7 +177,7 @@ test("Slack reconnect cannot send an answer generated for the old connection", a
         event: { text: "hi" },
       },
     },
-    id,
+    id, [], { slackEnabled: true },
   );
   const conn = {
     id: "conn",
@@ -275,7 +289,8 @@ test("subscriptions request receipts for every configured messaging channel", as
 test("a sender grant does not authorize every destination in an ordinary group", async () => {
   const evt = sms("hello");
   delete evt.companion;
-  evt.data.text_message.recipients = [{}, {}];
+  evt.data.text_message.recipients = null;
+  evt.data.text_message.remote_phone_number = "+12025550122";
   const route = parseRoute(evt, id, ["+12025550122"]);
   const current = {
     id: "conversation",
@@ -307,4 +322,71 @@ test("unclassified Companion messages do not inherit direct access", () => {
   const evt = sms("Hello");
   delete evt.data.text_message.sender_access;
   assert.equal(parseRoute(evt, id), null);
+});
+
+test("SMS group membership is authoritative even without group fields in the webhook", async () => {
+  const event = sms("/clear");
+  delete event.companion;
+  event.data.text_message.recipients = null;
+  const route = parseRoute(event, id);
+  const members = ["+12025550122", "+12025550133"];
+  const calls = [];
+  const agent = {
+    ...id,
+    listTextConversations: async (options) => {
+      calls.push(options);
+      if (!options.offset)
+        return Array.from({ length: 200 }, (_, i) => ({
+          id: "unrelated-" + i,
+        }));
+      return [{ id: "conversation", isGroup: true, participants: members }];
+    },
+  };
+  assert(await beforeTurn(route, {}, agent));
+  assert.equal(route.group, true);
+  assert.equal(route.noControls, true);
+  assert.deepEqual(
+    calls.map((c) => c.offset),
+    [0, 200],
+  );
+  assert(
+    calls.every((c) => c.includeGroups && c.participants[0] === "+12025550122"),
+  );
+  const mentionOnly = parseRoute(event, id, [], { groupReplyMode: "mention" });
+  assert.equal(await beforeTurn(mentionOnly, {}, agent), false);
+  members.push("+12025550144");
+  await assert.rejects(
+    sendReply(route, "old cohort answer", "key", {}, agent),
+    /destination changed/,
+  );
+});
+
+test("Slack wakes and subscriptions require an explicit opt-in", async () => {
+  const event = { id:"evt", event_type:"slack.dm_received", data:{
+    identity_id:id.id, connection_id:"conn", workspace_id:"team", actor_id:"peer",
+    message_ts:"900.01", conversation_id:"dm", event:{text:"hello"},
+  }};
+  assert.equal(parseRoute(event, id), null);
+  assert.ok(parseRoute(event, id, [], {slackEnabled:true}));
+  for (const slackEnabled of [false, true]) {
+    const rows = [];
+    const subscriptions = {list: async () => [], create: async row => rows.push(row)};
+    await subscribe({webhooks:{subscriptions}}, id, "https://example.com/events", {slackEnabled});
+    assert.equal(rows.some(row => row.eventTypes.includes("slack.dm_received")), slackEnabled);
+  }
+});
+
+test("a changed reply-all audience is not sent a previously generated reply", async () => {
+  const event = {id:"evt", event_type:"message.received", data:{message:{
+    direction:"inbound", id:"source", mailbox_id:"box", thread_id:"thread",
+    from_address:"sender@example.com", body:"hello",
+  }}};
+  const source = { id:"source", direction:"inbound", mailboxId:"box", threadId:"thread",
+    fromAddress:"sender@example.com", bodyText:"hello", replyAllRecipients:{to:["sender@example.com"],cc:[]} };
+  const owner = { ...id, mailbox:{id:"box",emailAddress:"agent@example.com"}, getMessage:async () => source,
+    replyAllEmail:async () => assert.fail("must not send") };
+  const route = parseRoute(event, owner);
+  assert.ok(await beforeTurn(route, {}, owner));
+  source.replyAllRecipients.cc.push("new@example.com");
+  await assert.rejects(sendReply(route, "answer", "key", {}, owner), /destination changed/);
 });

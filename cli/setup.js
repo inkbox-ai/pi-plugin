@@ -73,6 +73,11 @@ export async function configure(config, options, io, clientFor = createClient) {
   const baseUrl = normalizeOrigin(options.baseUrl || config.baseUrl);
   const sameOrigin = baseUrl === config.baseUrl;
   let key = options.key || (sameOrigin && config.apiKey);
+  if (options.replaceKey) {
+    if (!io) throw problem("Key replacement needs an interactive terminal or bootstrap --api-key-stdin.");
+    key = await io.secret("Paste the replacement Inkbox API key");
+    if (!key) throw problem("No replacement key entered. Your existing profile was not changed.");
+  }
   let requested = (options.identity || (sameOrigin && config.identity) || "").replace(/^@/, "");
   const projectDir = io && !options.projectDir
     ? await io.ask("Project directory [" + config.projectDirectory + "]")

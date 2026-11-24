@@ -12,8 +12,14 @@ import { join } from "node:path";
 import { digest, parseRoute, beforeTurn, sendReply } from "./channels.js";
 import { parseA2AOutcome } from "../extension/a2a-outcome.js";
 import { externalRoute, reportExternalFailure } from "./external.js";
+import { completionSource, transcriptSource, waitsForTranscript } from "./media.js";
+import { boundedReply } from "./reply-limits.js";
+import { failureCategory } from "./diagnostics.js";
+import { problem } from "../cli/errors.js";
 import { deliveryNotification } from "./delivery.js";
 import { hasProjectGrant, runPiTurn } from "./pi.js";
+
+import { openProjectGrants, verifyProjectConversation } from "./project-grants.js";
 
 const MAX_WAITING = 256;
 const CONCURRENCY = 4;
@@ -39,7 +45,7 @@ export function createGatewayRuntime(
   { client, identity, turn = runPiTurn, reply = sendReply, logger = console },
 ) {
   if (!identity?.id || !config.home)
-    throw new Error("Gateway identity and state directory required.");
+    throw problem("Gateway identity and state directory required.");
   const dir = join(config.home, "gateway", digest(config.baseUrl, identity.id));
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const owner = new DatabaseSync(join(dir, "owner.sqlite"));
@@ -47,11 +53,9 @@ export function createGatewayRuntime(
     owner.exec("BEGIN EXCLUSIVE");
   } catch (error) {
     owner.close();
-    throw new Error("Another gateway owns this identity's state.", {
-      cause: error,
-    });
+    throw problem("Another gateway owns this identity's state. Stop it before starting another.");
   }
-  let db;
+  let db, projectGrantFor;
   try {
     db = new DatabaseSync(join(dir, "inbox.sqlite"));
     chmodSync(join(dir, "inbox.sqlite"), 0o600);
@@ -61,6 +65,11 @@ export function createGatewayRuntime(
         sequence INTEGER, command TEXT, state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, due INTEGER NOT NULL DEFAULT 0
       );
       CREATE TABLE IF NOT EXISTS receipts(event TEXT PRIMARY KEY, job TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS media_wait(job TEXT PRIMARY KEY, source TEXT NOT NULL, deadline INTEGER NOT NULL);
+      CREATE INDEX IF NOT EXISTS waiting_source ON media_wait(source);
+      CREATE TRIGGER IF NOT EXISTS media_finished AFTER UPDATE OF state ON jobs WHEN NEW.state != 'queued'
+        BEGIN DELETE FROM media_wait WHERE job=NEW.id; END;
+      CREATE TABLE IF NOT EXISTS diagnostics(job TEXT PRIMARY KEY, attempt INTEGER NOT NULL, category TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS outbound(channel TEXT, message TEXT, job TEXT NOT NULL, PRIMARY KEY(channel,message));
       CREATE TABLE IF NOT EXISTS notices(channel TEXT, message TEXT, state TEXT NOT NULL, received INTEGER NOT NULL, PRIMARY KEY(channel,message));
       DELETE FROM notices WHERE received < unixepoch() - 2592000;
@@ -70,6 +79,9 @@ export function createGatewayRuntime(
         thread TEXT PRIMARY KEY, revision TEXT NOT NULL, actor TEXT, sequence INTEGER
       );
       UPDATE jobs SET state='uncertain' WHERE state IN ('sending','project')`);
+    db.exec("BEGIN IMMEDIATE");
+    projectGrantFor = openProjectGrants(db, config);
+    db.exec("COMMIT");
   } catch (error) {
     db?.close();
     owner.close();
@@ -109,6 +121,13 @@ export function createGatewayRuntime(
       throw new Error("Missing event identifier.");
     if (db.prepare("SELECT 1 FROM receipts WHERE event=?").get(event.id))
       return "duplicate";
+    if (event.event_type === "message.transcription_finished") {
+      const source = completionSource(event);
+      if (!source) return "ignored";
+      const updated = db.prepare("UPDATE jobs SET due=0 WHERE state='queued' AND id IN (SELECT job FROM media_wait WHERE source=?)").run(source);
+      if (updated.changes) schedule();
+      return updated.changes ? "accepted" : "ignored";
+    }
     const notice = deliveryNotification(event, identity);
     if (notice) {
       // A delivery callback can precede the send response. Retain its status, not its body.
@@ -140,6 +159,10 @@ export function createGatewayRuntime(
     if (!route) return "ignored";
     // Distinct subscriptions can deliver a single source message under different event IDs.
     const id = digest(identity.id, route.channel, route.thread, route.message);
+    route.projectGrant = projectGrantFor(route);
+    if (route.projectGrant || route.channel === "a2a")
+      route.thread = digest(route.thread, "project-scope", route.projectGrant, route.assignment,
+        route.channel === "whatsapp" ? identity.whatsappNumber : route.channel === "imessage" ? identity.imessageNumber?.number : null);
     if (stateOf.get(id)) {
       db.prepare("INSERT INTO receipts(event,job) VALUES(?,?)").run(
         event.id,
@@ -184,6 +207,10 @@ export function createGatewayRuntime(
         JSON.stringify(route),
         route.reportError ? "report" : "queued",
       );
+      if (waitsForTranscript(route)) {
+        const source = transcriptSource(route);
+        if (source) db.prepare("INSERT INTO media_wait(job,source,deadline) VALUES(?,?,?)").run(id, source, Date.now()+60_000);
+      }
       db.prepare("INSERT INTO receipts(event,job) VALUES(?,?)").run(
         event.id,
         id,
@@ -227,6 +254,31 @@ export function createGatewayRuntime(
 
   async function processJob(job, signal) {
     const route = JSON.parse(job.payload);
+    if (route.projectGrant && route.projectGrant !== projectGrantFor(route)) {
+      mark.run("ignored", job.id);
+      return;
+    }
+    // Retries survive service restarts; the current owner's routing policy, not
+    // a previous process's saved copy, must authorize delayed work and replies.
+    const allowedSenders = config.allowedSenders ?? [];
+    const allowedRecipients = config.outbound?.allowedRecipients ?? [];
+    const changedSenders = JSON.stringify(allowedSenders) !== JSON.stringify(route.allowedSenders ?? []);
+    route.allowedSenders = allowedSenders;
+    route.allowedRecipients = allowedRecipients;
+    route.groupReplyMode = config.groupReplyMode ?? "auto";
+    const matches = (list, value) => list.some(entry => entry.trim().toLowerCase() === value.toLowerCase());
+    if ((route.channel === "slack" && !config.slackEnabled) ||
+        (route.sponsored && config.companionResponseMode !== "relaxed") ||
+        (route.channel !== "external" && config.outbound?.approval === "allowlist" && !allowedRecipients.length) ||
+        (!route.sponsored && route.channel !== "slack" && allowedSenders.length && !matches(allowedSenders, route.sender)) ||
+        (route.channel === "a2a" && allowedRecipients.length &&
+          !allowedRecipients.includes(route.callerId) && !matches(allowedRecipients, route.sender)) ||
+        (route.projectGrant && route.channel !== "a2a" && allowedRecipients.length && !allowedRecipients.includes(route.sender)) ||
+        (job.state === "reply" && route.companion?.activation && changedSenders &&
+         !(await beforeTurn(route, client, identity, {hasSession:true})))) {
+      mark.run("ignored", job.id);
+      return;
+    }
     if (job.state === "report") {
       await reportExternalFailure(route, client, identity);
       mark.run("failed", job.id);
@@ -248,6 +300,19 @@ export function createGatewayRuntime(
         return;
       }
       if (signal.aborted) return;
+      const mediaWait = db.prepare("SELECT deadline FROM media_wait WHERE job=?").get(job.id);
+      if (mediaWait) {
+        if (waitsForTranscript(route) && Date.now() < mediaWait.deadline) {
+          db.prepare("UPDATE jobs SET due=? WHERE id=?").run(Math.min(mediaWait.deadline,Date.now()+5_000),job.id);
+          return;
+        }
+        db.prepare("DELETE FROM media_wait WHERE job=?").run(job.id);
+      }
+      if (job.command && (route.noControls ||
+          (route.projectGrant && job.command !== route.text.trim().toLowerCase()))) {
+        mark.run("ignored", job.id);
+        return;
+      }
       if (job.command) {
         transaction(() => {
           answer = applyControl(job, route);
@@ -278,6 +343,11 @@ export function createGatewayRuntime(
           saveAnswer.run(answer, JSON.stringify(route), job.id);
         });
         if (session) rmSync(pathFor(session.revision), { force: true });
+        const worker = active.get(job.id);
+        if (worker?.projectTurn) {
+          worker.projectTurn = false;
+          schedule();
+        }
       }
     }
     if (closed || signal.aborted) return;
@@ -288,6 +358,12 @@ export function createGatewayRuntime(
       );
       return;
     }
+    if (route.projectGrant &&
+        (projectGrantFor(route) !== route.projectGrant ||
+          (reply !== sendReply && route.channel !== "a2a" && !(await verifyProjectConversation(route, identity))))) {
+      mark.run("ignored", job.id);
+      return;
+    }
     let result;
     if (answer.trim() && answer.trim() !== "[SILENT]") {
       // No idempotency key is available for task completion. A crash after
@@ -295,16 +371,16 @@ export function createGatewayRuntime(
       if (route.channel === "a2a")
         db.prepare("UPDATE jobs SET state='sending' WHERE id=?").run(job.id);
       try {
-        result = await reply(route, answer, job.id, client, identity);
+        result = await reply(route, boundedReply(route.channel, answer), job.id, client, identity);
       } catch (error) {
         if (route.channel !== "a2a") throw error;
         db.prepare("UPDATE jobs SET state='uncertain' WHERE id=?").run(job.id);
-        logger.error("Inkbox Pi reply outcome is unknown:", job.id);
+        recordFailure(job.id, job.attempts + 1, failureCategory(error, "reply-delivery"));
         return;
       }
     }
     transaction(() => {
-      let state = "done";
+      let state = result?.skipped ? "ignored" : "done";
       if (
         result?.id &&
         ["email", "sms", "imessage", "whatsapp"].includes(route.channel)
@@ -321,17 +397,26 @@ export function createGatewayRuntime(
     });
   }
 
-  function retry(job, signal) {
+  function recordFailure(id, attempt, category) {
+    db.prepare("INSERT OR REPLACE INTO diagnostics(job, attempt, category) VALUES(?,?,?)").run(id,attempt,category);
+    logger.error("Inkbox Pi job failed:", id, "attempt", attempt, category);
+  }
+
+  function retry(job, signal, error) {
     if (signal.aborted) return;
     const { attempts, state } = db
       .prepare("SELECT attempts,state FROM jobs WHERE id=?")
       .get(job.id);
+    const category = failureCategory(error, state === "reply" ? "reply-delivery" : "event-processing");
+    recordFailure(job.id, attempts + 1, category);
     if (state === "project") {
       db.prepare("UPDATE jobs SET state='uncertain' WHERE id=?").run(job.id);
       logger.error("Inkbox Pi project turn was interrupted:", job.id);
       return;
     }
-    if (attempts < RETRIES.length) {
+    const status = error?.statusCode;
+    const permanent = Number.isInteger(status) && status >= 400 && status < 500 && ![408,409,425,429].includes(status);
+    if (!permanent && attempts < RETRIES.length) {
       db.prepare("UPDATE jobs SET attempts=attempts+1,due=? WHERE id=?").run(
         Date.now() + RETRIES[attempts],
         job.id,
@@ -393,9 +478,14 @@ export function createGatewayRuntime(
           )
         )
           continue;
+        // All project grants in this runtime name the same owner-selected files.
+        // Serialize just their model turns, not ordinary conversations or deliveries.
+        const projectTurn = job.state === "queued" && !job.command &&
+          Boolean(JSON.parse(job.payload).projectGrant);
+        if (projectTurn && workers.some((worker) => worker.projectTurn)) continue;
         const controller = new AbortController();
         const promise = processJob(job, controller.signal)
-          .catch(() => retry(job, controller.signal))
+          .catch((error) => retry(job, controller.signal, error))
           .catch(done.reject)
           .finally(() => {
             active.delete(job.id);
@@ -404,6 +494,7 @@ export function createGatewayRuntime(
         active.set(job.id, {
           thread: job.thread,
           command: job.command,
+          projectTurn,
           controller,
           promise,
         });
@@ -432,6 +523,9 @@ export function createGatewayRuntime(
           )
           .get(eventId)?.state ?? "unknown"
       );
+    },
+    lastFailure(eventId) {
+      return db.prepare("SELECT category,attempt FROM diagnostics JOIN receipts ON diagnostics.job=receipts.job WHERE event=?").get(eventId) ?? null;
     },
     eventResult(eventId) {
       return (

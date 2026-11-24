@@ -1,3 +1,5 @@
+import { verifyProjectConversation } from "./project-grants.js";
+import { attachments, describeMedia, refreshMedia, waitsForTranscript } from "./media.js";
 import { parseA2AOutcome } from "../extension/a2a-outcome.js";
 import { createHash } from "node:crypto";
 import {
@@ -26,17 +28,6 @@ const slackEvents = [
 ];
 const taskEvents = ["a2a.task.created", "a2a.task.message"];
 
-function mediaDescription(media) {
-  if (!Array.isArray(media) || media.length === 0) return "";
-  return (
-    "Attachments: " +
-    media
-      .slice(0, 20)
-      .map((item) => item?.filename || item?.content_type || "attachment")
-      .join(", ")
-  );
-}
-
 /** The event envelope is authenticated before this function is called. Routes are never taken from model output. */
 export function parseRoute(event, identity, allowedSenders = [], options = {}) {
   const data = event?.data;
@@ -64,13 +55,14 @@ export function parseRoute(event, identity, allowedSenders = [], options = {}) {
     actor,
     contextId,
     recipients,
-    control;
+    control, media = [], caption;
   if (
     event.companion != null &&
     !["ordinary", "initialization", "live"].includes(event.companion.phase)
   )
     return null;
   if (slackEvents.includes(event.event_type)) {
+    if (!options.slackEnabled) return null;
     if (
       data.identity_id !== identity.id ||
       !eligibleAccess(data.sender_access, event.companion, options) ||
@@ -120,7 +112,9 @@ export function parseRoute(event, identity, allowedSenders = [], options = {}) {
       clean(data.thread_ts) ||
       (group && !event.companion ? data.message_ts : "");
     message = data.message_ts;
-    text = [data.event?.text, mediaDescription(data.event?.files)]
+    caption = clean(data.event?.text);
+    media = attachments(data.event?.files);
+    text = [caption, media.length && "[Attachment]"]
       .filter(Boolean)
       .join("\n");
     if (
@@ -141,7 +135,7 @@ export function parseRoute(event, identity, allowedSenders = [], options = {}) {
       (data.sender && data.sender.identity_id !== data.caller?.identity_id)
     )
       return null;
-    sender = clean(data.caller?.handle);
+    sender = clean(data.caller?.handle) || callerId;
     conversation = clean(data.task_id);
     message = clean(data.message_id);
     contextId = clean(data.context_id);
@@ -162,7 +156,8 @@ export function parseRoute(event, identity, allowedSenders = [], options = {}) {
     )
       return null;
     message = clean(record.id);
-    const media = mediaDescription(record.media);
+    media = attachments(record.media);
+    caption = clean(record.content ?? record.text ?? record.body);
     group = record.is_group === true || (record.participants?.length ?? 0) > 2;
     recipients = record.participants;
     if (Array.isArray(record.recipients) && record.recipients.length > 1)
@@ -206,7 +201,7 @@ export function parseRoute(event, identity, allowedSenders = [], options = {}) {
           clean(record.sender_phone_number) ||
           clean(record.remote_phone_number);
         conversation = clean(record.conversation_id);
-        text = [record.text, media].filter(Boolean).join("\n");
+        text = [record.text, media.length && "[Attachment]"].filter(Boolean).join("\n");
         break;
       case "imessage.received":
         if (!identity.imessageEnabled) return null;
@@ -215,7 +210,7 @@ export function parseRoute(event, identity, allowedSenders = [], options = {}) {
         conversation = clean(record.conversation_id);
         subthread =
           clean(record.thread_root_message_id) || clean(record.thread_id);
-        text = [record.content, media].filter(Boolean).join("\n");
+        text = [record.content, media.length && "[Attachment]"].filter(Boolean).join("\n");
         break;
       case "whatsapp.received":
         if (record.agent_identity_id !== identity.id) return null;
@@ -224,7 +219,7 @@ export function parseRoute(event, identity, allowedSenders = [], options = {}) {
         conversation = clean(record.conversation_id);
         subthread =
           clean(record.thread_root_message_id) || clean(record.thread_id);
-        text = [record.content, media].filter(Boolean).join("\n");
+        text = [record.content, media.length && "[Attachment]"].filter(Boolean).join("\n");
         break;
       default:
         return null;
@@ -271,7 +266,7 @@ export function parseRoute(event, identity, allowedSenders = [], options = {}) {
   )
     return null;
   const route = {
-    callerId,
+    media, caption, callerId,
     contextId,
     channel,
     sender,
@@ -288,7 +283,10 @@ export function parseRoute(event, identity, allowedSenders = [], options = {}) {
     archivedMessage,
     control,
     sponsored,
+    directAccess: record?.sender_access === "direct",
+    assignment: channel === "imessage" ? record?.assignment_id ?? null : null,
     allowedSenders,
+    groupReplyMode: options.groupReplyMode ?? "auto",
     recipients,
     allowedRecipients: options.outbound?.allowedRecipients ?? [],
   };
@@ -305,17 +303,19 @@ export function parseRoute(event, identity, allowedSenders = [], options = {}) {
     route.group = true;
   }
   route.noControls =
+    media.length > 0 ||
     route.group ||
     Boolean(route.companion) ||
     route.channel === "a2a" ||
     (channel === "slack" && allowedSenders.length > 0);
   if (
     route.group &&
+    route.channel !== "sms" &&
     options.groupReplyMode === "mention" &&
     !addressed &&
     !record?.agent_mentioned &&
     !mentionsAgent(
-      record?.content ?? record?.text ?? record?.body ?? text,
+      caption ?? "",
       identity.agentHandle,
     )
   )
@@ -384,7 +384,7 @@ async function slackSource(route, client, identity) {
     )
       return false;
   }
-  if (route.companion) {
+  if (route.companion || (waitsForTranscript(route) && route.archivedMessage)) {
     const match = /^(\d{1,12})\.(\d{1,6})$/.exec(route.message);
     if (!match) return false;
     const ticks = BigInt(match[1]) * 1000000n + BigInt(match[2].padEnd(6, "0"));
@@ -412,6 +412,7 @@ async function slackSource(route, client, identity) {
     )
       return false;
     route.archivedMessage = source.id;
+    refreshMedia(route, source.files);
   }
   return recipientsAllowed(
     route,
@@ -425,16 +426,16 @@ async function taskSource(route, identity) {
   if (
     task.id !== route.conversation ||
     task.contextId !== route.contextId ||
-    task.target?.identityId !== identity.id ||
+    (task.target != null && task.target.identityId !== identity.id) ||
     task.caller?.identityId !== route.callerId ||
-    normalized(task.caller?.handle) !== normalized(route.sender) ||
+    normalized(task.caller?.handle || task.caller?.identityId) !== normalized(route.sender) ||
     !["submitted", "working"].includes(task.state)
   )
     return false;
-  const latest = task.messages?.at(-1);
+  const callerRoles = new Set(["caller","role_caller","user","role_user"]);
+  const latest = task.messages?.findLast((item) => callerRoles.has(normalized(item.role)));
   if (
     !latest ||
-    !["caller", "user", "ROLE_USER"].includes(latest.role) ||
     latest.messageId !== route.message
   )
     return false;
@@ -445,7 +446,69 @@ async function taskSource(route, identity) {
   return Boolean(route.text);
 }
 
+async function smsSource(route, identity) {
+  // The SMS notification names the authoritative phone and conversation, but
+  // does not carry isGroup/participants. A null recipients array is normal
+  // for inbound group MMS. Resolve the current membership for every turn.
+  const limit = 200;
+  let offset = 0;
+  const seenPages = new Set();
+  for (;;) {
+    const page = await identity.listTextConversations({
+      participants: [route.sender],
+      includeGroups: true,
+      limit,
+      offset,
+    });
+    const matches = page.filter((item) => item.id === route.conversation);
+    if (matches.length) {
+      if (matches.length !== 1) return false;
+      const conversation = matches[0];
+      if (
+        typeof conversation.isGroup !== "boolean" ||
+        !Array.isArray(conversation.participants) ||
+        !conversation.participants.length ||
+        conversation.participants.some(
+          (p) => typeof p !== "string" || !/^\+[1-9]\d{6,14}$/.test(p),
+        ) ||
+        !conversation.participants.includes(route.sender)
+      )
+        return false;
+      const members = [...new Set(conversation.participants)].sort();
+      if (
+        members.length !== conversation.participants.length ||
+        conversation.isGroup !== members.length > 1 ||
+        (!conversation.isGroup &&
+          conversation.remotePhoneNumber !== route.sender) ||
+        (route.companion && !conversation.isGroup)
+      )
+        return false;
+      // A send replay must not expand the audience that saw the original turn.
+      if (
+        route.smsMembers &&
+        JSON.stringify(route.smsMembers) !== JSON.stringify(members)
+      )
+        return false;
+      route.smsMembers = members;
+      route.group = conversation.isGroup;
+      route.noControls ||= route.group;
+      return (
+        (!route.group ||
+          route.groupReplyMode !== "mention" ||
+          mentionsAgent(route.caption ?? route.text, identity.agentHandle)) &&
+        recipientsAllowed(route, members, [identity.phoneNumber.number])
+      );
+    }
+    if (page.length < limit) return false;
+    const fingerprint = digest(page.map((item) => item.id));
+    if (seenPages.has(fingerprint)) return false;
+    seenPages.add(fingerprint);
+    offset += page.length;
+  }
+}
+
 async function messagingSource(route, identity) {
+  if (route.projectGrant) return verifyProjectConversation(route, identity);
   if (route.channel === "email") {
     const source = await identity.getMessage(route.message);
     if (
@@ -459,12 +522,18 @@ async function messagingSource(route, identity) {
     route.text = [
       source.subject,
       source.bodyText ?? source.bodyHtml,
-      mediaDescription(source.attachmentMetadata),
+      describeMedia(attachments(source.attachmentMetadata)),
     ]
       .filter(Boolean)
       .join("\n");
     const recipients = source.replyAllRecipients;
-    route.replyRecipients = recipients && [...recipients.to, ...recipients.cc];
+    if (!Array.isArray(recipients?.to) || !Array.isArray(recipients?.cc)) return false;
+    const audience = [...new Set([...recipients.to, ...recipients.cc].map(normalized))].sort();
+    if (!audience.length || (route.replyRecipients &&
+        JSON.stringify(route.replyRecipients) !== JSON.stringify(audience))) return false;
+    route.replyRecipients = audience;
+    route.group ||= audience.filter(address => address !== normalized(identity.mailbox.emailAddress)).length > 1;
+    route.noControls ||= route.group;
     return (
       Boolean(route.text) &&
       recipientsAllowed(route, route.replyRecipients, [
@@ -487,6 +556,7 @@ async function messagingSource(route, identity) {
         (route.subthread || "")
     )
       return false;
+    refreshMedia(route, source.media);
     if (route.group || source.isGroup || route.allowedRecipients?.length) {
       const destination = whatsapp
         ? await identity.getWhatsAppConversation(route.conversation)
@@ -515,43 +585,17 @@ async function messagingSource(route, identity) {
     }
     return true;
   }
-  if (
-    route.channel === "sms" &&
-    (route.allowedRecipients?.length ||
-      (route.group &&
-        !route.companion?.activation &&
-        route.allowedSenders.length))
-  ) {
-    // A remote participant list can change. For restricted replies, do not rely
-    // on an old webhook snapshot to authorize sending into a group.
-    const source = await identity.getText(route.message);
-    if (
-      source.id !== route.message ||
-      source.conversationId !== route.conversation ||
-      source.direction !== "inbound" ||
-      source.localPhoneNumber !== identity.phoneNumber.number ||
-      (source.senderPhoneNumber || source.remotePhoneNumber) !== route.sender
-    )
-      return false;
-    if (route.group || source.recipients?.length > 1) {
-      // Select the exact current group, never a contact or the first matching telephone number.
-      const page = await identity.listTextConversations({
-        participants: [route.sender],
-        includeGroups: true,
-        limit: 200,
-      });
-      const matches = page.filter((item) => item.id === route.conversation);
-      return (
-        matches.length === 1 &&
-        matches[0].isGroup &&
-        matches[0].participants?.includes(route.sender) &&
-        recipientsAllowed(route, matches[0].participants, [
-          identity.phoneNumber.number,
-        ])
-      );
+  if (route.channel === "sms") {
+    if (!await smsSource(route, identity)) return false;
+    if (waitsForTranscript(route)) {
+      const source = await identity.getText(route.message);
+      if (source.id !== route.message || source.direction !== "inbound" || source.conversationId !== route.conversation ||
+        source.localPhoneNumber !== identity.phoneNumber?.number || (source.senderPhoneNumber || source.remotePhoneNumber) !== route.sender) return false;
+      refreshMedia(route, source.media);
     }
-    return recipientsAllowed(route, [route.sender], []);
+    return true;
   }
+
   return true;
 }
 
@@ -565,6 +609,9 @@ export async function beforeTurn(
   if (route.channel === "slack") {
     if (!(await slackSource(route, client, identity))) return false;
   } else if (!(await messagingSource(route, identity))) return false;
+  if (route.media?.length && !route.projectGrant) {
+    route.text = [route.caption, describeMedia(route.media)].filter(Boolean).join("\n");
+  }
   return prepareCompanion(route, client, identity, hasSession);
 }
 
@@ -612,15 +659,15 @@ export async function sendReply(route, text, idempotencyKey, client, identity) {
       });
     case "imessage":
       return identity.sendIMessage({
+        ...(route.projectGrant ? { plainReplyFallback: false } : {}),
         conversationId: route.conversation,
-        replyToMessageId: route.message,
+        ...(route.subthread ? {replyToMessageId: route.message} : {}),
         text,
         idempotencyKey,
       });
     case "whatsapp":
       return identity.sendWhatsApp({
         conversationId: route.conversation,
-        replyToMessageId: route.message,
         text,
         idempotencyKey,
       });
@@ -640,13 +687,13 @@ export async function sendReply(route, text, idempotencyKey, client, identity) {
     case "a2a":
       if (await taskSource(route, identity))
         return identity.a2aReply(route.conversation, parseA2AOutcome(text));
-      return;
+      return { skipped: true };
     default:
       throw new Error("Unknown reply channel.");
   }
 }
 
-export async function subscribe(client, identity, url) {
+export async function subscribe(client, identity, url, { slackEnabled = false } = {}) {
   const owners = [];
   if (identity.mailbox)
     owners.push([
@@ -658,7 +705,7 @@ export async function subscribe(client, identity, url) {
       { phoneNumberId: identity.phoneNumber.id },
       ["text.received", "text.delivery_failed", "text.delivery_unconfirmed"],
     ]);
-  const identityEvents = [...taskEvents, ...slackEvents];
+  const identityEvents = slackEnabled ? [...taskEvents, ...slackEvents] : [...taskEvents];
   if (identity.imessageEnabled)
     identityEvents.push("imessage.received", "imessage.delivery_failed");
   if (identity.whatsappEnabled || identity.whatsappNumber)

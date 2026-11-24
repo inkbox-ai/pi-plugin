@@ -7,6 +7,7 @@ import { createServer } from 'node:http';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { startGateway } from '../gateway/index.js';
+import { runPiTurn } from '../gateway/pi.js';
 
 const identity = {
   id: 'agent', agent_handle: 'fixture', organization_id: 'organization',
@@ -53,6 +54,9 @@ test('signed SMS resumes Pi across gateway restarts and replies exactly once to 
     else if (url.pathname === '/api/whoami') json({auth_type:'api_key', auth_subtype:'api_key.agent_scoped.claimed'});
     else if (url.pathname === '/api/v1/identities/' || url.pathname === '/api/v1/identities') json([identity]);
     else if (url.pathname === '/api/v1/identities/fixture') json(identity);
+    else if (url.pathname === '/api/v1/phone/numbers/phone/texts/conversations') json([{
+      id:'conversation', is_group:false, remote_phone_number:'+12025550102', participants:['+12025550102']
+    }]);
     else if (url.pathname === '/api/v1/webhooks/catalog') json({supports_identity_subscriptions:true});
     else if (url.pathname === '/api/v1/webhooks/subscriptions' && req.method === 'GET') {
       json({subscriptions:subscriptions.filter(row =>
@@ -115,4 +119,14 @@ test('signed SMS resumes Pi across gateway restarts and replies exactly once to 
   assert.deepEqual(replies.map(r => [r.conversation_id, r.text]), [['conversation','first answer'],['conversation','second answer']]);
   assert.ok(replies[0].key && replies[1].key && replies[0].key !== replies[1].key);
   assert.ok(subscriptions.some(row => row.event_types.includes('text.received')));
+
+  // Exercise precisely the production Pi invocation used after the runtime has
+  // authenticated a grant. Inspect what the actual model sees, not CLI flags.
+  await runPiTurn({...config, projectFiles:['project.txt']}, {
+    channel:'imessage', sender:'+12025550102', text:'What files are available?', projectGrant:'fixture-grant',
+  }, join(workspace, 'project-session.jsonl'), new AbortController().signal);
+  assert.deepEqual(modelRequests.at(-1).tools.map(tool => tool.function.name).sort(),
+    ['inkbox_project_read', 'inkbox_project_replace']);
+  for (const tool of modelRequests.at(-1).tools)
+    assert.deepEqual(tool.function.parameters.properties.file.enum, ['project.txt']);
 });

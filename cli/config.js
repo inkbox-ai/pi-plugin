@@ -94,12 +94,16 @@ export function loadConfig(env = process.env) {
     if (!Array.isArray(list) || list.some(v => typeof v !== "string")) throw new Error("Expected a list of strings for " + field);
     return list;
   }
+  const slackSetting = env.INKBOX_SLACK_ENABLED ?? (sameIdentity && saved.slackEnabled) ?? false;
+  if (![true, false, "true", "false"].includes(slackSetting)) throw new Error("Choose true or false for slackEnabled.");
+  const slackEnabled = slackSetting === true || slackSetting === "true";
   const groupReplyMode = env.INKBOX_GROUP_REPLY_MODE || (sameIdentity && saved.groupReplyMode) || "auto";
   const companionResponseMode = env.INKBOX_COMPANION_RESPONSE_MODE || (sameIdentity && saved.companionResponseMode) || "safe";
   if (!["auto", "mention"].includes(groupReplyMode)) throw new Error("Choose auto or mention for groupReplyMode.");
   if (!["safe", "relaxed"].includes(companionResponseMode)) throw new Error("Choose safe or relaxed for companionResponseMode.");
   return {
-    home, baseUrl, identity, publicUrl, port, groupReplyMode, companionResponseMode,
+    home, baseUrl, identity, publicUrl, port, groupReplyMode, companionResponseMode, slackEnabled,
+    trustedConversations: listSetting("INKBOX_PI_TRUSTED_CONVERSATIONS", "trustedConversations"),
     trustedAgentIds: listSetting("INKBOX_PI_TRUSTED_AGENT_IDS", "trustedAgentIds"),
     projectFiles: listSetting("INKBOX_PI_PROJECT_FILES", "projectFiles"),
     apiKey: env.INKBOX_API_KEY || (sameIdentity && saved.apiKey) || (sharedMatches && shared.api_key) || "",

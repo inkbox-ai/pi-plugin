@@ -2,6 +2,9 @@ import { createServer } from "node:http";
 import { once } from "node:events";
 import { verifyWebhook } from "@inkbox/sdk";
 import { connect } from "@inkbox/sdk/tunnels/connect";
+import { checkPiModel } from "./preflight.js";
+import { startupProblem } from "./diagnostics.js";
+import { problem } from "../cli/errors.js";
 import { InvalidExternalEvent } from "./external.js";
 import { createClient, verifiedIdentity } from "../cli/setup.js";
 import { subscribe } from "./channels.js";
@@ -63,16 +66,26 @@ export function webhookHandler(signingKey, acceptVerified) {
 
 export async function startGateway(config) {
   if (!config.signingKey || !config.apiKey || !config.identity)
-    throw new Error("Run inkbox-pi setup before starting the gateway.");
+    throw problem("Run inkbox-pi setup before starting the gateway.");
   if (
     config.publicUrl &&
     (!config.port || !/^https:\/\//i.test(config.publicUrl))
   ) {
-    throw new Error("A public URL needs HTTPS and a fixed local port.");
+    throw problem("A public URL needs HTTPS and a fixed local port.");
   }
   const client = createClient(config.apiKey, config.baseUrl);
-  const identity = await verifiedIdentity(client, config.identity);
-  const runtime = createGatewayRuntime(config, { client, identity });
+  await checkPiModel(config);
+  let runtime, identity;
+  try {
+    identity = await verifiedIdentity(client, config.identity);
+  } catch (error) {
+    throw startupProblem("identity verification", error);
+  }
+  try {
+    runtime = createGatewayRuntime(config, { client, identity });
+  } catch (error) {
+    throw startupProblem("state initialization", error);
+  }
   const server = createServer(
     webhookHandler(config.signingKey, runtime.acceptVerified),
   );
@@ -96,12 +109,14 @@ export async function startGateway(config) {
   function close() {
     return (closeTask ??= cleanup());
   }
+  let stage = "listener setup";
   try {
     server.listen(config.port ?? 0, "127.0.0.1");
     await once(server, "listening");
     let publicUrl = config.publicUrl;
     let failed = runtime.failed;
     if (!publicUrl) {
+      stage = "tunnel connection";
       const connected = Promise.withResolvers();
       listener = await connect(client, {
         name: config.tunnelName || identity.agentHandle,
@@ -111,14 +126,26 @@ export async function startGateway(config) {
           if (status === "connected") connected.resolve();
         },
       });
-      const served = listener.wait().then(() => {
-        if (!stopping) throw new Error("The Inkbox tunnel closed.");
-      });
+      const served = listener.wait().then(
+        () => {
+          if (!stopping)
+            throw problem(
+              "The Inkbox tunnel closed. Check its connection before restarting.",
+            );
+        },
+        (error) => {
+          if (!stopping) throw startupProblem("tunnel connection", error);
+        },
+      );
       failed = Promise.race([served, runtime.failed]);
       failed.catch(() => {});
       const timeout = setTimeout(
         () =>
-          connected.reject(new Error("Inkbox tunnel connection timed out.")),
+          connected.reject(
+            problem(
+              "Inkbox tunnel connection timed out. Check connectivity and the tunnel name.",
+            ),
+          ),
         15_000,
       );
       try {
@@ -129,10 +156,11 @@ export async function startGateway(config) {
       publicUrl = listener.publicUrl;
     }
     const webhook = new URL("/webhook", publicUrl).href;
-    await subscribe(client, identity, webhook);
+    stage = "webhook subscription setup";
+    await subscribe(client, identity, webhook, config);
     return { publicUrl, failed, close };
   } catch (error) {
     await close();
-    throw error;
+    throw startupProblem(stage, error);
   }
 }
