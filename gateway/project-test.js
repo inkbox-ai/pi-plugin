@@ -132,7 +132,8 @@ async function sandbox(root, config) {
     // No fork in the Seatbelt profile: a test cannot daemonize and survive
     // cancellation. Use a single-process test runner (e.g. node <test.js>).
     const system = [
-      "/System",
+      "/System/Library",
+      "/System/Volumes/Preboot/Cryptexes",
       "/usr/bin",
       "/usr/lib",
       "/bin",
@@ -145,6 +146,10 @@ async function sandbox(root, config) {
     const node = "(literal " + JSON.stringify(process.execPath) + ")";
     const profile =
       "(version 1)(deny default)(allow process-exec sysctl-read)" +
+      '(deny sysctl-read (sysctl-name-prefix "kern.proc"))' +
+      // libignition enumerates the root mount at process startup on macOS 26.
+      // This literal permits its directory listing, not reads of descendants.
+      '(allow file-read* (literal "/"))' +
       "(allow file-map-executable " +
       read +
       " " +

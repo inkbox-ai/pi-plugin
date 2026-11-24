@@ -14,7 +14,7 @@ const proposal = {
   newText: "*new*",
 };
 
-async function fixture(t) {
+async function fixture(t, projectAction) {
   const home = await mkdtemp(join(tmpdir(), "pi-edit-approval-"));
   const config = {
     home,
@@ -23,8 +23,14 @@ async function fixture(t) {
     trustedConversations: ["imessage:room:" + sender],
   };
   const sources = new Map();
+  const emails = [];
   const identity = {
     id: "identity",
+    mailbox: { id: "mailbox" },
+    async sendEmail(payload) {
+      emails.push(payload);
+      return { id: "sent" };
+    },
     imessageEnabled: true,
     imessageNumber: { number: "+12025550100" },
     getIMessage: async (id) => sources.get(id),
@@ -46,9 +52,11 @@ async function fixture(t) {
     runtime = createGatewayRuntime(config, {
       client: {},
       identity,
-      async turn(_config, route, file, signal, confirmEdit) {
+      async turn(_config, route, file, signal, confirmEdit, performAction) {
         turns.push(route.message);
-        const confirmed = await confirmEdit(proposal);
+        const confirmed = projectAction
+          ? await performAction(projectAction)
+          : await confirmEdit(proposal);
         result.resolve(confirmed);
         if (!signal.aborted) await writeFile(file, "transcript");
         return confirmed ? "allowed" : "not allowed";
@@ -122,6 +130,7 @@ async function fixture(t) {
       }),
     until,
     sources,
+    emails,
     prompt,
     delivery,
     result,
@@ -300,6 +309,35 @@ test(
         assert.equal(await f.result.promise, false);
         await f.until("work", "done");
         assert.equal(f.submit("stale", command), "ignored");
+      });
+  },
+);
+
+test(
+  "an approved email still obeys the recipient list and tool policy at the moment of submission",
+  { timeout: 10000 },
+  async (t) => {
+    for (const policy of ["recipient", "tool"])
+      await t.test(policy, async (t) => {
+        const action = {
+          kind: "email",
+          recipient: "team@example.test",
+          subject: "Test result",
+          body: "4 passing",
+        };
+        const f = await fixture(t, action);
+        f.submit("work", "Please email the result");
+        const prompt = await f.prompt.promise;
+        assert.deepEqual(JSON.parse(prompt.split("\n")[1]), action);
+        const approve = prompt.match(/\/approve [a-f0-9]{24}/)[0];
+        assert.equal(f.submit("decision", approve), "accepted");
+        await f.until("decision", "done");
+        if (policy === "recipient")
+          f.config.outbound = { allowedRecipients: [sender] };
+        else f.config.tools = { disable: ["inkbox_send_email"] };
+        f.delivery.resolve({ id: "challenge" });
+        assert.equal(await f.result.promise, false);
+        assert.deepEqual(f.emails, []);
       });
   },
 );

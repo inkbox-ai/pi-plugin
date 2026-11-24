@@ -614,7 +614,8 @@ test("trusted mail reads the stored body, checks the thread and never uses a dyn
     { ccAddresses: ["else@example.test"] },
     { toAddresses: ["alias@example.test"] },
     { replyAllRecipients: { to: ["else@example.test"], cc: [] } },
-    { bodyText: null, bodyHtml: body },
+    { bodyText: null, bodyHtml: "<blockquote>" + body + "</blockquote>" },
+    { bodyText: null, bodyHtml: "" },
   ]) {
     assert.equal(
       await verifyProjectConversation(candidate, {

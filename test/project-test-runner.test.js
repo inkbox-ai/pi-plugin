@@ -163,8 +163,19 @@ test(
         },
         signal,
       );
+    const marker = join(dir, "private-runtime-marker");
+    await writeFile(marker, "never staged");
     const output = await run(
-      'console.log("x".repeat(14000))',
+      'const fs = require("node:fs"), assert = require("node:assert/strict");' +
+        "assert.throws(() => fs.readFileSync(" +
+        JSON.stringify(marker) +
+        "));" +
+        (process.platform === "darwin"
+          ? "assert.throws(() => fs.readFileSync(" +
+            JSON.stringify("/System/Volumes/Data" + marker) +
+            "));"
+          : "") +
+        'console.log("x".repeat(14000));',
       new AbortController().signal,
     );
     assert.match(output, /exit 0/);
