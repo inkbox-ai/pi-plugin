@@ -18,3 +18,4 @@ jobs:
         run: node scripts/smoke-package.mjs
       - name: Validate npm release without publishing
         run: ./publish.sh
+      - run: npm run typecheck

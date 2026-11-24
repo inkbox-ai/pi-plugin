@@ -4,6 +4,7 @@ import path from "node:path";
 import { parseArgs } from "node:util";
 import { loadConfig, readProfile } from "./config.js";
 import { configure, createClient, verifiedIdentity } from "./setup.js";
+import { modelEnvironment } from "./model-env.js";
 import { prompts } from "./prompts.js";
 import { service, serviceStatus } from "./service.js";
 import { problem } from "./errors.js";
@@ -21,6 +22,9 @@ const HELP = `inkbox-pi — Inkbox for the Pi coding agent
   autostart install|uninstall|status
                       Enable, remove or inspect the login service
   uninstall           Remove the background service, preserving your profile
+
+Log in to a model with Pi, or set INKBOX_PI_MODEL_ENV to a comma-separated
+list of provider API-key variable names to keep in the private service profile.
 `;
 
 const CHECKLIST = `Connect the Pi extension with inkbox-pi setup in an interactive terminal.
@@ -106,6 +110,8 @@ export async function main(argv) {
     const home = args[0];
     const settings = readProfile(path.join(home, "service"));
     if (!settings.overrides) throw problem("Service profile not found; rerun inkbox-pi start.");
+    const allowedModelEnv = modelEnvironment({ ...settings.modelEnv, INKBOX_PI_MODEL_ENV: Object.keys(settings.modelEnv || {}).join(",") });
+    Object.assign(process.env, allowedModelEnv);
     if (settings.path) process.env.PATH = settings.path;
     if (settings.agentDir) process.env.PI_CODING_AGENT_DIR = settings.agentDir;
     const baseline = loadConfig({ INKBOX_PI_HOME: home });
@@ -130,7 +136,8 @@ export async function main(argv) {
       const selected = await configure(config, {
         identity: values.identity, baseUrl: values["base-url"], projectDir: values["project-dir"],
         key: values["api-key-stdin"] ? await readKey() : process.env.INKBOX_API_KEY,
-        signingKey: process.env.INKBOX_SIGNING_KEY,
+        signingKey: process.env.INKBOX_SIGNING_KEY || ((!values.identity || values.identity.replace(/^@/, "") === config.identity) &&
+          (!values["base-url"] || values["base-url"] === config.baseUrl) ? config.signingKey : undefined),
         rotate: values["rotate-signing-key"],
       }, io);
       if (!selected.ready) {
@@ -140,7 +147,7 @@ export async function main(argv) {
       if (io) console.log("Setup complete: @" + selected.identity);
       // Consume the scoped credential we just persisted, not the admin key
       // used as input to bootstrap or a previous profile's key from the shell.
-      const saved = loadConfig({ ...process.env, INKBOX_BASE_URL: "", INKBOX_API_KEY: "", INKBOX_IDENTITY: "", INKBOX_SIGNING_KEY: "" });
+      const saved = loadConfig({ ...process.env, INKBOX_BASE_URL: "", INKBOX_API_KEY: "", INKBOX_IDENTITY: "", INKBOX_AGENT_IDENTITY: "", INKBOX_AGENT_HANDLE: "", INKBOX_SIGNING_KEY: "" });
       let started = false;
       if (values["start-gateway"] || (io && await io.confirm("Start the gateway and keep it running at login?"))) {
         await service(io ? "install" : "restart", saved);

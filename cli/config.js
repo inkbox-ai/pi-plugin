@@ -38,12 +38,31 @@ export function normalizeOrigin(url) {
   return parsed.origin;
 }
 
+// The shared SDK profile uses `key = value` lines. Bind its key and signing
+// secret to its origin/identity rather than independently mixing sources.
+function readSharedProfile(accountHome) {
+  let contents;
+  try { contents = readFileSync(path.join(accountHome, ".inkbox", "config"), "utf8"); }
+  catch (error) { if (error.code === "ENOENT") return {}; throw error; }
+  const profile = {};
+  for (const line of contents.split("\n")) {
+    const match = line.match(/^\s*(api_key|base_url|identity|signing_key)\s*=\s*(.*?)\s*$/);
+    if (match) profile[match[1]] = match[2].replace(/^['"]|['"]$/g, "");
+  }
+  return profile;
+}
+
 export function loadConfig(env = process.env) {
   const home = configHome(env);
   const saved = readProfile(home);
-  const baseUrl = normalizeOrigin(env.INKBOX_BASE_URL || saved.baseUrl || "https://inkbox.ai");
+  const shared = readSharedProfile(env.HOME || homedir());
+  const sharedOrigin = normalizeOrigin(shared.base_url || "https://inkbox.ai");
+  const sharedIdentity = (shared.identity || "").replace(/^@/, "");
+  const baseUrl = normalizeOrigin(env.INKBOX_BASE_URL || saved.baseUrl || sharedOrigin);
   const sameOrigin = normalizeOrigin(saved.baseUrl || "https://inkbox.ai") === baseUrl;
-  const identity = (env.INKBOX_IDENTITY || (sameOrigin && saved.identity) || "").replace(/^@/, "");
+  const identity = (env.INKBOX_IDENTITY || env.INKBOX_AGENT_IDENTITY || env.INKBOX_AGENT_HANDLE ||
+    (sameOrigin && saved.identity) || (sharedOrigin === baseUrl && sharedIdentity) || "").replace(/^@/, "");
+  const sharedMatches = baseUrl === sharedOrigin && identity === sharedIdentity;
   const sameIdentity = sameOrigin && identity === saved.identity;
   const publicUrl = env.INKBOX_PI_PUBLIC_URL || (sameIdentity && saved.publicUrl) || undefined;
   const port = Number(env.INKBOX_PI_PORT || saved.port || (publicUrl ? 18793 : 0));
@@ -56,12 +75,17 @@ export function loadConfig(env = process.env) {
     if (!Array.isArray(list) || list.some(v => typeof v !== "string")) throw new Error("Expected a list of strings for " + field);
     return list;
   }
+  const groupReplyMode = env.INKBOX_GROUP_REPLY_MODE || (sameIdentity && saved.groupReplyMode) || "auto";
+  const companionResponseMode = env.INKBOX_COMPANION_RESPONSE_MODE || (sameIdentity && saved.companionResponseMode) || "safe";
+  if (!["auto", "mention"].includes(groupReplyMode)) throw new Error("Choose auto or mention for groupReplyMode.");
+  if (!["safe", "relaxed"].includes(companionResponseMode)) throw new Error("Choose safe or relaxed for companionResponseMode.");
   return {
-    home, baseUrl, identity, publicUrl, port,
+    home, baseUrl, identity, publicUrl, port, groupReplyMode, companionResponseMode,
     trustedAgentIds: listSetting("INKBOX_PI_TRUSTED_AGENT_IDS", "trustedAgentIds"),
     projectFiles: listSetting("INKBOX_PI_PROJECT_FILES", "projectFiles"),
-    apiKey: env.INKBOX_API_KEY || (sameIdentity && saved.apiKey) || "",
-    signingKey: env.INKBOX_SIGNING_KEY || (sameIdentity && saved.signingKey) || "",
+    apiKey: env.INKBOX_API_KEY || (sameIdentity && saved.apiKey) || (sharedMatches && shared.api_key) || "",
+    signingKey: env.INKBOX_SIGNING_KEY || (sameIdentity && saved.signingKey) ||
+      (sharedMatches && sharedIdentity && shared.signing_key) || "",
     projectDirectory: path.resolve(env.INKBOX_PI_PROJECT_DIR || saved.projectDirectory || process.cwd()),
     piBin: env.INKBOX_PI_BIN || saved.piBin || "pi",
     tunnelName: env.INKBOX_PI_TUNNEL_NAME || (sameIdentity && saved.tunnelName) || identity,

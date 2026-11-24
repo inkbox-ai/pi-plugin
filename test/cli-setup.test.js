@@ -9,7 +9,7 @@ import { loadConfig, readProfile, saveProfile } from "../cli/config.js";
 function fixture(t) {
   const home = mkdtempSync(path.join(tmpdir(), "pi-setup-"));
   t.after(() => rmSync(home, { recursive: true, force: true }));
-  const config = loadConfig({ INKBOX_PI_HOME: home });
+  const config = loadConfig({ HOME: home, INKBOX_PI_HOME: home });
   const counts = { minted: 0, signed: 0 };
   const identity = {
     agentHandle: "pi-example", id: "agent-id",

@@ -6,7 +6,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { problem } from "./errors.js";
-import { loadConfig, saveProfile } from "./config.js";
+import { loadConfig, saveProfile, readProfile } from "./config.js";
+
+import { modelEnvironment } from "./model-env.js";
 
 const entry = fileURLToPath(new URL("../bin/inkbox-pi.js", import.meta.url));
 
@@ -30,7 +32,7 @@ function write(file, data) {
 }
 
 function unitQuote(value) {
-  return '"' + value.replaceAll("\\", "\\\\").replaceAll('"', '\\"').replaceAll("%", "%%").replaceAll("$", "$$") + '"';
+  return '"' + value.replaceAll("\\", "\\\\").replaceAll('"', '\\"').replaceAll("%", "%%").replaceAll("$", () => "$$") + '"';
 }
 
 export function unitFile(node, bin, home) {
@@ -90,7 +92,12 @@ function saveServiceSettings(config) {
     .filter(([key, value]) => JSON.stringify(value) !== JSON.stringify(baseline[key])));
   // A service with no saved profile still needs a stable working directory.
   overrides.projectDirectory = config.projectDirectory;
-  saveProfile(path.join(home, "service"), {
+  const serviceDir = path.join(home, "service");
+  const previous = readProfile(serviceDir);
+  const sameOwner = previous.profileIdentity === baseline.identity && previous.profileOrigin === baseline.baseUrl;
+  const modelEnv = modelEnvironment(process.env, sameOwner ? previous.modelEnv : undefined);
+  saveProfile(serviceDir, {
+    modelEnv,
     overrides, profileIdentity: baseline.identity, profileOrigin: baseline.baseUrl,
     path: process.env.PATH, agentDir: process.env.PI_CODING_AGENT_DIR,
   });
