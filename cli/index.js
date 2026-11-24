@@ -11,7 +11,7 @@ import {
 } from "./setup.js";
 import { modelEnvironment } from "./model-env.js";
 import { prompts } from "./prompts.js";
-import { service, serviceStatus } from "./service.js";
+import { service, serviceStatus, servicePiCommand } from "./service.js";
 import { problem } from "./errors.js";
 import { checkPiModel } from "../gateway/preflight.js";
 
@@ -167,7 +167,14 @@ export async function main(argv) {
       );
     }
     return foreground(
-      { ...baseline, ...settings.overrides, home },
+      {
+        ...baseline,
+        ...settings.overrides,
+        ...(settings.piPaths
+          ? { piBin: servicePiCommand(settings.piPaths) }
+          : {}),
+        home,
+      },
       settings.fingerprint || "legacy",
     );
   }

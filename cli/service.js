@@ -174,7 +174,7 @@ export function serviceStatus(config, fingerprint) {
 
 // Version managers may expose Pi through a shell-specific symlink that is
 // removed at logout. Persist its actual executable for the login service.
-export function servicePiBin(binary, searchPath = process.env.PATH ?? "") {
+export function servicePiPaths(binary, searchPath = process.env.PATH ?? "") {
   const candidates = binary.includes(path.sep)
     ? [path.resolve(binary)]
     : searchPath
@@ -185,7 +185,14 @@ export function servicePiBin(binary, searchPath = process.env.PATH ?? "") {
     try {
       const resolved = realpathSync(candidate);
       accessSync(resolved, constants.X_OK);
-      if (statSync(resolved).isFile()) return resolved;
+      if (statSync(resolved).isFile())
+        return {
+          launcher: path.join(
+            realpathSync(path.dirname(candidate)),
+            path.basename(candidate),
+          ),
+          executable: resolved,
+        };
     } catch (error) {
       if (!["ENOENT", "ENOTDIR", "EACCES"].includes(error.code)) throw error;
     }
@@ -193,6 +200,12 @@ export function servicePiBin(binary, searchPath = process.env.PATH ?? "") {
   throw problem(
     "Cannot find an executable Pi for this service. Check INKBOX_PI_BIN and PATH.",
   );
+}
+
+// Keep the basename for shims that select a command from argv[0]. If a shell
+// removes its temporary launcher, an ordinary npm entry is still runnable.
+export function servicePiCommand(paths) {
+  return existsSync(paths.launcher) ? paths.launcher : paths.executable;
 }
 
 // Copy only settings required by this profile, not an arbitrary caller's
@@ -207,7 +220,7 @@ function saveServiceSettings(config) {
   );
   // A service with no saved profile still needs a stable working directory.
   overrides.projectDirectory = config.projectDirectory;
-  overrides.piBin = servicePiBin(config.piBin);
+  const piPaths = servicePiPaths(config.piBin);
   const serviceDir = path.join(home, "service");
   const previous = readProfile(serviceDir);
   const sameOwner =
@@ -221,6 +234,7 @@ function saveServiceSettings(config) {
     selectedIdentity: config.identity,
     selectedOrigin: config.baseUrl,
     modelEnv,
+    piPaths,
     overrides,
     profileIdentity: baseline.identity,
     profileOrigin: baseline.baseUrl,

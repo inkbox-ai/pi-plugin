@@ -138,7 +138,9 @@ test("teardown works even when the profile cannot be parsed", async (t) => {
 });
 
 test("login services resolve the real executable behind a transient shell PATH", async (t) => {
-  const { servicePiBin } = await import("../cli/service.js");
+  const { servicePiPaths, servicePiCommand } = await import(
+    "../cli/service.js"
+  );
   const { symlinkSync, writeFileSync, unlinkSync, realpathSync } = await import(
     "node:fs"
   );
@@ -147,9 +149,16 @@ test("login services resolve the real executable behind a transient shell PATH",
   const launcher = path.join(dir, "pi");
   writeFileSync(target, "#!/bin/sh\n", { mode: 0o755 });
   symlinkSync(target, launcher);
-  const selected = servicePiBin("pi", dir);
+  const selected = servicePiPaths("pi", dir);
+  assert.equal(path.basename(servicePiCommand(selected)), "pi");
   unlinkSync(launcher);
-  assert.equal(selected, realpathSync(target));
-  assert.equal(servicePiBin(selected, dir), selected);
-  assert.throws(() => servicePiBin("pi", dir), /Cannot find an executable Pi/);
+  assert.equal(servicePiCommand(selected), realpathSync(target));
+  assert.equal(
+    servicePiCommand(servicePiPaths(target, dir)),
+    realpathSync(target),
+  );
+  assert.throws(
+    () => servicePiPaths("pi", dir),
+    /Cannot find an executable Pi/,
+  );
 });
