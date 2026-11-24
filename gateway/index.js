@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 import { once } from "node:events";
 import { Inkbox, verifyWebhook } from "@inkbox/sdk";
 import { connect } from "@inkbox/sdk/tunnels/connect";
+import { verifiedIdentity } from "../cli/setup.js";
 import { subscribe } from "./channels.js";
 import { createGatewayRuntime } from "./runtime.js";
 export { createGatewayRuntime };
@@ -24,7 +25,9 @@ export function webhookHandler(signingKey, acceptVerified) {
       const payload = Buffer.concat(chunks);
       let verified = false;
       try {
-        verified = Boolean(signingKey && req.headers["x-inkbox-request-id"] && req.headers["x-inkbox-timestamp"]) &&
+        const timestamp = req.headers["x-inkbox-timestamp"];
+        verified = Boolean(signingKey && req.headers["x-inkbox-request-id"]) && /^\d+$/.test(timestamp) &&
+          Math.abs(Date.now() / 1000 - Number(timestamp)) <= 300 &&
           verifyWebhook({ payload, headers: req.headers, secret: signingKey });
       } catch { /* Invalid signatures fail closed. */ }
       if (!verified) return end(401);
@@ -43,7 +46,7 @@ export async function startGateway(config) {
     throw new Error("A public URL needs HTTPS and a fixed local port.");
   }
   const client = new Inkbox({ apiKey: config.apiKey, baseUrl: config.baseUrl });
-  const identity = await client.getIdentity(config.identity);
+  const identity = await verifiedIdentity(client, config.identity);
   const runtime = createGatewayRuntime(config, { client, identity });
   const server = createServer(webhookHandler(config.signingKey, runtime.acceptVerified));
   server.requestTimeout = 15_000;

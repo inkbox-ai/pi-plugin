@@ -49,6 +49,12 @@ Configure model access in Pi itself before starting a background service. The ga
 
 By default the gateway uses an Inkbox tunnel. To supply your own HTTPS endpoint, set `INKBOX_PI_PUBLIC_URL` and a fixed `INKBOX_PI_PORT` and forward `/webhook` to that port. Set `INKBOX_PI_ALLOWED_SENDERS` to a comma-separated list to narrow inbound senders. Keep your signing key private; rotating it replaces the key for the identity, not just for this installation.
 
+In a direct conversation, send `/status` for work status, `/stop` or `/cancel` to stop work, or `/new` or `/clear` to start a fresh session. These are messages to the gateway, not commands to type at a shell. Use `INKBOX_GROUP_REPLY_MODE=mention` to limit ordinary group wake-ups to messages addressing the agent.
+
+If your model credential exists only in a shell variable, set `INKBOX_PI_MODEL_ENV` to the **name** of the supported credential variable before installing or starting the service. The value is kept in the private service profile, not in the service definition. This isn't necessary when Pi already has a saved login.
+
+By default incoming turns cannot read or edit project files. For a trusted agent-to-agent caller, the owner can set both `INKBOX_PI_TRUSTED_AGENT_IDS` (exact identity IDs) and `INKBOX_PI_PROJECT_FILES` (exact existing file paths relative to the project). This grants bounded read/replace tools for those files, not a general-purpose shell.
+
 For unattended setup with an existing identity, pass its key through stdin rather than a command-line argument:
 
     inkbox-pi bootstrap --identity my-agent --api-key-stdin --project-dir "$PWD"
@@ -56,6 +62,8 @@ For unattended setup with an existing identity, pass its key through stdin rathe
 ## Embedding
 
 Import `createGatewayRuntime` from `@inkbox/pi-plugin/runtime` when your application owns event delivery and process supervision. Pass an initialized SDK client, its verified identity, and a persistent state directory. The runtime accepts **already verified** events; it is not a raw HTTP endpoint. To run the HTTP listener, signature verification, subscriptions and tunnel together, use `startGateway` instead. Don't run two owners against one profile.
+
+Call `runtime.acceptVerified(event)` to admit an event, then inspect `runtime.eventState(event.id)` to distinguish queued work from a delivered reply or a failure. Admission alone is not a delivery receipt. Watch `runtime.failed` for a fatal runtime error and await `runtime.close()` on shutdown.
 
 ## Releases
 

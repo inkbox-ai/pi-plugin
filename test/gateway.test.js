@@ -24,8 +24,9 @@ test("signed ingress rejects changed bytes before admission", async () => {
   await once(server, "listening");
   const url = "http://127.0.0.1:" + server.address().port + "/webhook";
   const body = JSON.stringify(sms("1"));
-  const signature = createHmac("sha256", "test-secret").update("request.123." + body).digest("hex");
-  const headers = { "x-inkbox-signature": "sha256=" + signature, "x-inkbox-timestamp": "123", "x-inkbox-request-id": "request" };
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const signature = createHmac("sha256", "test-secret").update("request." + timestamp + "." + body).digest("hex");
+  const headers = { "x-inkbox-signature": "sha256=" + signature, "x-inkbox-timestamp": timestamp, "x-inkbox-request-id": "request" };
   try {
     assert.equal((await fetch(url, { method: "POST", body, headers })).status, 202);
     assert.equal((await fetch(url, { method: "POST", body: body + " ", headers })).status, 401);
@@ -96,4 +97,77 @@ test("subscription reconciliation preserves another URL and excludes calling", a
   await subscribe(client, identity, "https://example.com/webhook");
   assert.equal(created.length, n);
   assert.ok(!created.flatMap((r) => r.eventTypes).some((e) => e.startsWith("call.")));
+});
+
+test("only the conversation sender can cancel its active turn, without prompting Pi", { timeout: 5000 }, async () => {
+  const home = await mkdtemp(join(tmpdir(), "inkbox-pi-"));
+  const started = Promise.withResolvers();
+  const otherReply = Promise.withResolvers(), ownerReply = Promise.withResolvers();
+  const prompts = [];
+  const runtime = createGatewayRuntime({ home }, { identity, client: {}, async turn(_, route, _file, signal) {
+    prompts.push(route.text);
+    started.resolve();
+    await new Promise((_, reject) => signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true }));
+  }, async reply(route, answer) {
+    if (route.message === "other") otherReply.resolve(answer);
+    if (route.message === "owner") ownerReply.resolve(answer);
+  } });
+  try {
+    runtime.acceptVerified(sms("first", "Can you help?"));
+    await started.promise;
+    const other = sms("other", "/stop"); other.data.text_message.sender_phone_number = "+12025550109";
+    runtime.acceptVerified(other);
+    assert.match(await otherReply.promise, /another sender/);
+    runtime.acceptVerified(sms("owner", "/cancel"));
+    assert.match(await ownerReply.promise, /Stopped/);
+    assert.equal(runtime.eventState("evt-first"), "canceled");
+    assert.deepEqual(prompts, ["Can you help?"]);
+  } finally { await runtime.close(); await rm(home, { recursive: true, force: true }); }
+});
+
+test("/clear removes only this thread's retained Pi session", { timeout: 5000 }, async () => {
+  const home = await mkdtemp(join(tmpdir(), "inkbox-pi-"));
+  let sent = Promise.withResolvers();
+  const calls = [];
+  const runtime = createGatewayRuntime({ home }, { identity, client: {}, async turn(_, route, file) {
+    let history = "";
+    try { history = await readFile(file, "utf8"); } catch (error) { if (error.code !== "ENOENT") throw error; }
+    calls.push([route.text, history]);
+    await writeFile(file, route.text);
+    return "OK";
+  }, async reply(_, answer) { sent.resolve(answer); } });
+  try {
+    for (const [id, text] of [["1", "secret"], ["2", "/status"], ["3", "/clear"], ["4", "hello"]]) {
+      sent = Promise.withResolvers();
+      runtime.acceptVerified(sms(id, text));
+      const answer = await sent.promise;
+      if (text === "/status") assert.match(answer, /idle/);
+      if (text === "/clear") assert.match(answer, /cleared/);
+    }
+    assert.deepEqual(calls, [["secret", ""], ["hello", ""]]);
+  } finally { await runtime.close(); await rm(home, { recursive: true, force: true }); }
+});
+
+test("delivery callbacks racing the send response update the receipt, never send a second reply", { timeout: 5000 }, async () => {
+  const home = await mkdtemp(join(tmpdir(), "inkbox-pi-"));
+  let sends = 0;
+  const entered = Promise.withResolvers();
+  const resume = Promise.withResolvers();
+  const runtime = createGatewayRuntime({ home }, { identity, client: {}, async turn(_, route, file) {
+    await writeFile(file, route.text); return "Reply.";
+  }, async reply() { sends++; entered.resolve(); await resume.promise; return { id: "sent-1" }; } });
+  try {
+    runtime.acceptVerified(sms("trigger"));
+    await entered.promise;
+    const receipt = { id: "receipt-1", event_type: "text.delivery_unconfirmed", data: { text_message: {
+      id: "sent-1", direction: "outbound", local_phone_number: identity.phoneNumber.number
+    } } };
+    runtime.acceptVerified(receipt);
+    resume.resolve();
+    while (runtime.eventState("evt-trigger") === "reply") await new Promise((r) => setTimeout(r, 5));
+    assert.equal(runtime.eventState("evt-trigger"), "uncertain");
+    runtime.acceptVerified({ ...receipt, id: "receipt-2", event_type: "text.delivery_failed" });
+    assert.equal(runtime.eventState("evt-trigger"), "failed");
+    assert.equal(sends, 1);
+  } finally { resume.resolve(); await runtime.close(); await rm(home, { recursive: true, force: true }); }
 });
