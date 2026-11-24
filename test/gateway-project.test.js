@@ -47,3 +47,88 @@ test("project grants edit one named file but not neighbors, hidden paths, or lin
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("direct edit requires the exact approved proposal and rejects a file changed during review", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "pi-edit-review-"));
+  const cwd = process.cwd();
+  const restore = (name, old) => {
+    if (old === undefined) delete process.env[name];
+    else process.env[name] = old;
+  };
+  const granted = process.env.INKBOX_PI_GRANTED_FILES;
+  const confirm = process.env.INKBOX_PI_CONFIRM_EDITS;
+  t.after(async () => {
+    restore("INKBOX_PI_GRANTED_FILES", granted);
+    restore("INKBOX_PI_CONFIRM_EDITS", confirm);
+    process.chdir(cwd);
+    await rm(dir, { recursive: true, force: true });
+  });
+  process.chdir(dir);
+  process.env.INKBOX_PI_GRANTED_FILES = '["note.md"]';
+  process.env.INKBOX_PI_CONFIRM_EDITS = "1";
+  const before = "\uFEFFfirst\nsecond\n";
+  await writeFile("note.md", before);
+  const tools = {};
+  register({
+    registerTool(tool) {
+      tools[tool.name] = tool.execute;
+    },
+  });
+  const proposal = {
+    file: "note.md",
+    oldText: "first",
+    newText: "hello\nworld",
+  };
+  const edit = (
+    review,
+    args = proposal,
+    signal = new AbortController().signal,
+  ) =>
+    tools.inkbox_project_replace("", args, signal, undefined, {
+      mode: "rpc",
+      ui: { confirm: review },
+    });
+  await assert.rejects(
+    edit(async (_title, encoded) => {
+      assert.deepEqual(JSON.parse(encoded), proposal);
+      return false;
+    }),
+    /not approved/,
+  );
+  assert.equal(await readFile("note.md", "utf8"), before);
+  await assert.rejects(
+    edit(() => assert.fail("oversize proposal reached the owner"), {
+      ...proposal,
+      newText: "a".repeat(1201),
+    }),
+    /too long/,
+  );
+  await assert.rejects(
+    edit(async () => {
+      await writeFile("note.md", "independent edit\n");
+      return true;
+    }),
+    /File changed/,
+  );
+  assert.equal(await readFile("note.md", "utf8"), "independent edit\n");
+
+  await writeFile("note.md", before);
+  const abort = new AbortController();
+  await assert.rejects(
+    edit(
+      () => {
+        abort.abort();
+        return true;
+      },
+      proposal,
+      abort.signal,
+    ),
+    { name: "AbortError" },
+  );
+  assert.equal(await readFile("note.md", "utf8"), before);
+  await edit(() => true);
+  assert.equal(
+    await readFile("note.md", "utf8"),
+    "\uFEFFhello\nworld\nsecond\n",
+  );
+});

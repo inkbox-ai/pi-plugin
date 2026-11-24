@@ -1,4 +1,5 @@
 import { journalDirectory } from "./journal.js";
+import { createEditApprovals, isEditControl } from "./approvals.js";
 import { DatabaseSync } from "node:sqlite";
 import {
   mkdirSync,
@@ -21,10 +22,12 @@ import {
 import { boundedReply } from "./reply-limits.js";
 import { failureCategory } from "./diagnostics.js";
 import { problem } from "../cli/errors.js";
+import { describeDelivery, openDeliveryJournal } from "./delivery-journal.js";
 import { deliveryNotification } from "./delivery.js";
 import { hasProjectGrant, runPiTurn } from "./pi.js";
 
 import {
+  directBinding,
   openProjectGrants,
   verifyProjectConversation,
 } from "./project-grants.js";
@@ -65,7 +68,7 @@ export function createGatewayRuntime(
       "Another gateway owns this identity's state. Stop it before starting another.",
     );
   }
-  let db, projectGrantFor;
+  let db, projectGrantFor, delivery;
   try {
     db = new DatabaseSync(join(dir, "inbox.sqlite"));
     chmodSync(join(dir, "inbox.sqlite"), 0o600);
@@ -91,6 +94,7 @@ export function createGatewayRuntime(
       );
       UPDATE jobs SET state='uncertain' WHERE state IN ('sending','project')`);
     db.exec("BEGIN IMMEDIATE");
+    delivery = openDeliveryJournal(db);
     projectGrantFor = openProjectGrants(db, config);
     db.exec("COMMIT");
   } catch (error) {
@@ -100,6 +104,7 @@ export function createGatewayRuntime(
   }
 
   const active = new Map();
+  const approvals = createEditApprovals();
   const done = Promise.withResolvers();
   done.promise.catch(() => {});
   let timer,
@@ -130,7 +135,10 @@ export function createGatewayRuntime(
     if (closed) throw new Error("Gateway closed.");
     if (typeof event?.id !== "string" || !event.id || event.id.length > 256)
       throw new Error("Missing event identifier.");
-    if (db.prepare("SELECT 1 FROM receipts WHERE event=?").get(event.id))
+    if (
+      db.prepare("SELECT 1 FROM receipts WHERE event=?").get(event.id) ||
+      delivery.isEarly(event.id)
+    )
       return "duplicate";
     if (event.event_type === "message.transcription_finished") {
       const source = completionSource(event);
@@ -149,7 +157,7 @@ export function createGatewayRuntime(
       transaction(() => {
         db.prepare(
           `INSERT INTO notices(channel,message,state,received) VALUES(?,?,?,unixepoch())
-          ON CONFLICT(channel,message) DO UPDATE SET state=CASE WHEN excluded.state='failed' THEN 'failed' ELSE notices.state END`,
+          ON CONFLICT(channel,message) DO UPDATE SET state=CASE WHEN excluded.state='failed' THEN 'failed' ELSE notices.state END, received=excluded.received`,
         ).run(notice.channel, notice.message, notice.state);
         const sent = db
           .prepare("SELECT job FROM outbound WHERE channel=? AND message=?")
@@ -163,6 +171,8 @@ export function createGatewayRuntime(
             event.id,
             sent.job,
           );
+        } else {
+          delivery.defer(event.id, notice.channel, notice.message);
         }
       });
       return "accepted";
@@ -203,7 +213,9 @@ export function createGatewayRuntime(
     )
       return "ignored";
     const text = (route.control ?? route.text).trim().toLowerCase();
-    const command = COMMANDS.has(text) ? text : null;
+    const editControl = isEditControl(text);
+    if (editControl && !approvals.matches(route, text)) return "ignored";
+    const command = COMMANDS.has(text) || editControl ? text : null;
     if (
       command &&
       (route.noControls ||
@@ -276,6 +288,7 @@ export function createGatewayRuntime(
       active.get(row.id)?.controller.abort();
     }
     if (job.command === "/clear" || job.command === "/new") {
+      delivery.clear(job);
       db.prepare("DELETE FROM sessions WHERE thread=?").run(job.thread);
       return (
         "Conversation cleared. Your next message starts a new session." +
@@ -287,9 +300,73 @@ export function createGatewayRuntime(
     return prior.length ? "Stopped." : "Nothing is running.";
   }
 
+  async function directProjectTurn(job, route, file, signal) {
+    const turnEnded = new AbortController();
+    const ownNumber = () =>
+      route.channel === "imessage"
+        ? identity.imessageNumber?.number
+        : identity.whatsappNumber;
+    const originalNumber = ownNumber();
+    const confirmEdit = (proposal, hostSignal) => {
+      const signals = [signal, turnEnded.signal];
+      if (hostSignal) signals.push(hostSignal);
+      const allowed = (source) =>
+        source.projectGrant === projectGrantFor(source) &&
+        config.projectFiles?.includes(proposal?.file) &&
+        originalNumber === ownNumber();
+      return approvals.request({
+        route,
+        proposal,
+        signal: AbortSignal.any(signals),
+        async verify(source, expectedCommand) {
+          if (!allowed(source)) return false;
+          const copy = {
+            ...source,
+            allowedRecipients: config.outbound?.allowedRecipients ?? [],
+          };
+          if (
+            config.outbound?.approval === "allowlist" &&
+            !copy.allowedRecipients.length
+          )
+            return false;
+          if (
+            config.allowedSenders?.length &&
+            !config.allowedSenders.includes(source.sender)
+          )
+            return false;
+          return (
+            (await verifyProjectConversation(copy, identity)) &&
+            allowed(source) &&
+            (expectedCommand
+              ? copy.text.trim().toLowerCase() === expectedCommand
+              : copy.text === source.text)
+          );
+        },
+        send: (prompt, code) =>
+          reply(
+            { ...route },
+            prompt,
+            digest(job.id, "edit-approval", code),
+            client,
+            identity,
+          ),
+      });
+    };
+    try {
+      return await turn(config, route, file, signal, confirmEdit);
+    } finally {
+      turnEnded.abort();
+    }
+  }
+
   async function processJob(job, signal) {
     const route = JSON.parse(job.payload);
-    if (route.projectGrant && route.projectGrant !== projectGrantFor(route)) {
+    if (
+      (job.command &&
+        isEditControl(job.command) &&
+        !approvals.matches(route, job.command)) ||
+      (route.projectGrant && route.projectGrant !== projectGrantFor(route))
+    ) {
       mark.run("ignored", job.id);
       return;
     }
@@ -374,6 +451,20 @@ export function createGatewayRuntime(
         mark.run("ignored", job.id);
         return;
       }
+      if (
+        isEditControl(route.text.trim()) ||
+        (job.command && isEditControl(job.command))
+      ) {
+        // beforeTurn authenticated the incoming control from Inkbox, including
+        // its body. Never reinterpret a stale or mismatched control as a turn.
+        const handled =
+          job.command &&
+          isEditControl(job.command) &&
+          route.projectGrant &&
+          approvals.consume(route, job.command);
+        mark.run(handled ? "done" : "ignored", job.id);
+        return;
+      }
       if (job.command) {
         transaction(() => {
           answer = applyControl(job, route);
@@ -382,6 +473,8 @@ export function createGatewayRuntime(
         if (session && !getSession.get(route.thread))
           rmSync(pathFor(session.revision), { force: true });
       } else {
+        const notes = delivery.unread(job);
+        route.deliveryContext = describeDelivery(notes);
         const file = pathFor(job.id);
         // A crash mid-turn never becomes the starting point for a retry.
         if (session) copyFileSync(pathFor(session.revision), file);
@@ -390,12 +483,17 @@ export function createGatewayRuntime(
         // them from the pre-turn transcript after an interrupted process.
         if (hasProjectGrant(config, route))
           db.prepare("UPDATE jobs SET state='project' WHERE id=?").run(job.id);
-        answer = await turn(config, route, file, signal);
+        answer =
+          route.projectGrant && directBinding(route) && !route.noControls
+            ? await directProjectTurn(job, route, file, signal)
+            : await turn(config, route, file, signal);
         if (signal.aborted) return;
         if (route.channel === "a2a") parseA2AOutcome(answer);
         flush(file);
         flush(dir);
         transaction(() => {
+          delivery.seen(notes);
+          delete route.deliveryContext;
           const actor =
             !session || session.actor === route.sender ? route.sender : null;
           db.prepare(
@@ -463,6 +561,7 @@ export function createGatewayRuntime(
         db.prepare(
           "INSERT OR REPLACE INTO outbound(channel,message,job) VALUES(?,?,?)",
         ).run(route.channel, result.id, job.id);
+        delivery.bind(job.id, route.channel, result.id);
         state =
           db
             .prepare("SELECT state FROM notices WHERE channel=? AND message=?")

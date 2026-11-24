@@ -335,17 +335,20 @@ test(
           },
         },
       };
-      runtime.acceptVerified(receipt);
+      assert.equal(runtime.acceptVerified(receipt), "accepted");
+      assert.equal(runtime.acceptVerified(receipt), "duplicate");
       resume.resolve();
       while (runtime.eventState("evt-trigger") === "reply")
         await new Promise((r) => setTimeout(r, 5));
       assert.equal(runtime.eventState("evt-trigger"), "uncertain");
+      assert.equal(runtime.eventState(receipt.id), "uncertain");
       runtime.acceptVerified({
         ...receipt,
         id: "receipt-2",
         event_type: "text.delivery_failed",
       });
       assert.equal(runtime.eventState("evt-trigger"), "failed");
+      assert.equal(runtime.eventState(receipt.id), "failed");
       assert.equal(sends, 1);
     } finally {
       resume.resolve();
@@ -520,3 +523,71 @@ test("narrowing the sender policy stops work that was queued before restart", as
     await new Promise((resolve) => setTimeout(resolve, 10));
   assert.equal(runtime.eventState("evt-pending"), "ignored");
 });
+
+test(
+  "delivery updates are quiet, survive restart, and stay in the sender's conversation until consumed or cleared",
+  { timeout: 5000 },
+  async () => {
+    const home = await mkdtemp(join(tmpdir(), "inkbox-pi-"));
+    const notes = [];
+    const deps = {
+      identity,
+      client: {},
+      async turn(_, route, file) {
+        notes.push(route.deliveryContext);
+        await writeFile(file, route.text);
+        return "Reply.";
+      },
+      async reply(route) {
+        return { id: "out-" + route.message };
+      },
+    };
+    let runtime = createGatewayRuntime({ home }, deps);
+    async function send(id, text, thread) {
+      const event = sms(id, text, thread);
+      assert.equal(runtime.acceptVerified(event), "accepted");
+      while (runtime.eventState(event.id) !== "done")
+        await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    function notice(id, status, message) {
+      assert.equal(
+        runtime.acceptVerified({
+          id,
+          event_type: "text.delivery_" + status,
+          data: {
+            text_message: {
+              id: "out-" + message,
+              direction: "outbound",
+              local_phone_number: identity.phoneNumber.number,
+            },
+          },
+        }),
+        "accepted",
+      );
+    }
+    try {
+      await send("initial");
+      notice("uncertain", "unconfirmed", "initial");
+      await runtime.close();
+      runtime = createGatewayRuntime({ home }, deps);
+      await send("other", "Hi", "thread-b");
+      await send("ask");
+      await send("again");
+      notice("failure", "failed", "initial");
+      await send("update");
+      notice("earlier", "failed", "ask");
+      await send("reset", "/clear");
+      notice("late", "failed", "again");
+      await send("new");
+      assert.equal(notes.length, 6);
+      assert.deepEqual(notes.slice(0, 2), [undefined, undefined]);
+      assert.match(notes[2], /0 reported failed, 1 unconfirmed/);
+      assert.equal(notes[3], undefined);
+      assert.match(notes[4], /1 reported failed, 0 unconfirmed/);
+      assert.equal(notes[5], undefined);
+    } finally {
+      await runtime.close();
+      await rm(home, { recursive: true, force: true });
+    }
+  },
+);

@@ -5,6 +5,7 @@ import { StringDecoder } from "node:string_decoder";
 import { A2A_RESPONSE_INSTRUCTIONS } from "../extension/a2a-outcome.js";
 
 import { hostProblem } from "./diagnostics.js";
+import { createEditRpc } from "./pi-rpc.js";
 import { restricted, piEnvironment } from "./preflight.js";
 
 const INSTRUCTIONS =
@@ -14,8 +15,10 @@ export function hasProjectGrant(config, route) {
   return Boolean(route.projectGrant && config.projectFiles?.length);
 }
 
-export function runPiTurn(config, route, sessionFile, signal) {
+export function runPiTurn(config, route, sessionFile, signal, confirmEdit) {
   const projectAccess = hasProjectGrant(config, route);
+  const directEdit =
+    projectAccess && ["imessage", "whatsapp"].includes(route.channel);
   const tools = projectAccess
     ? [
         "--no-builtin-tools",
@@ -27,8 +30,7 @@ export function runPiTurn(config, route, sessionFile, signal) {
     : ["--no-tools"];
   const args = [
     "--mode",
-    "json",
-    "--print",
+    ...(directEdit ? ["rpc"] : ["json", "--print"]),
     ...tools,
     ...restricted,
     "--system-prompt",
@@ -38,6 +40,9 @@ export function runPiTurn(config, route, sessionFile, signal) {
       (route.channel === "a2a" ? " " + A2A_RESPONSE_INSTRUCTIONS : "") +
       (projectAccess
         ? " Only the named project tools are authorized for this caller."
+        : "") +
+      (directEdit
+        ? " Each write needs the sender to approve the exact change through the gateway; never claim it was made unless the tool succeeds."
         : ""),
     "--session",
     sessionFile,
@@ -46,6 +51,7 @@ export function runPiTurn(config, route, sessionFile, signal) {
     const env = piEnvironment();
     if (projectAccess)
       env.INKBOX_PI_GRANTED_FILES = JSON.stringify(config.projectFiles);
+    if (directEdit) env.INKBOX_PI_CONFIRM_EDITS = "1";
     const child = spawn(config.piBin || "pi", args, {
       cwd: config.projectDirectory,
       env,
@@ -55,7 +61,17 @@ export function runPiTurn(config, route, sessionFile, signal) {
       finalMessage,
       failure;
     const decoder = new StringDecoder("utf8");
+    const lifetime = new AbortController();
+    const rpc =
+      directEdit &&
+      createEditRpc(
+        child.stdin,
+        config.projectFiles,
+        confirmEdit,
+        lifetime.signal,
+      );
     function stop() {
+      lifetime.abort();
       child.kill("SIGKILL");
     }
     const timer = setTimeout(() => {
@@ -66,17 +82,20 @@ export function runPiTurn(config, route, sessionFile, signal) {
     if (signal.aborted) stop();
     child.once("error", () => reject(hostProblem("pi-binary")));
     child.stdin.on("error", () => {});
-    child.stdin.end(
+    const prompt =
       "Incoming Inkbox message:\n" +
-        JSON.stringify({
-          channel: route.channel,
-          sender: route.sender,
-          text: route.text,
-        }),
-    );
+      JSON.stringify({
+        channel: route.channel,
+        sender: route.sender,
+        text: route.text,
+        deliveryContext: route.deliveryContext,
+      });
+    if (rpc) rpc.start(prompt);
+    else child.stdin.end(prompt);
     function readLine(line) {
       if (!line.trim()) return;
       const event = JSON.parse(line);
+      if (rpc) rpc.handle(event);
       if (event.type !== "message_end" || event.message?.role !== "assistant")
         return;
       // Pi may retry a provider error internally; only the final assistant
@@ -99,6 +118,7 @@ export function runPiTurn(config, route, sessionFile, signal) {
       }
     });
     child.once("close", (code) => {
+      lifetime.abort();
       clearTimeout(timer);
       signal.removeEventListener("abort", stop);
       try {
@@ -106,6 +126,7 @@ export function runPiTurn(config, route, sessionFile, signal) {
         if (failure) throw failure;
         if (
           signal.aborted ||
+          (rpc && !rpc.completed()) ||
           finalMessage?.stopReason === "aborted" ||
           finalMessage?.stopReason === "length"
         )

@@ -2,12 +2,18 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { once } from "node:events";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
 import { createServer } from "node:http";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { startGateway } from "../gateway/index.js";
-import { runPiTurn } from "../gateway/pi.js";
+import { setTimeout as delay } from "node:timers/promises";
+import { createGatewayRuntime, startGateway } from "../gateway/index.js";
 
 const identity = {
   id: "agent",
@@ -22,12 +28,9 @@ async function listen(server) {
   return server.address().port;
 }
 
-function modelResponse(res, text) {
+function streamCompletion(res, chunks) {
   res.writeHead(200, { "Content-Type": "text/event-stream" });
-  for (const [delta, finish_reason] of [
-    [{ role: "assistant", content: text }, null],
-    [{}, "stop"],
-  ]) {
+  for (const [delta, finish_reason] of chunks) {
     res.write(
       "data: " +
         JSON.stringify({
@@ -41,6 +44,45 @@ function modelResponse(res, text) {
     );
   }
   res.end("data: [DONE]\n\n");
+}
+
+function modelResponse(res, text) {
+  streamCompletion(res, [
+    [{ role: "assistant", content: text }, null],
+    [{}, "stop"],
+  ]);
+}
+
+function configurePi(t, home, agentDir, api) {
+  const saved = { ...process.env };
+  Object.assign(process.env, {
+    HOME: home,
+    PI_CODING_AGENT_DIR: agentDir,
+    PI_OFFLINE: "1",
+  });
+  writeFileSync(
+    join(agentDir, "models.json"),
+    JSON.stringify({
+      providers: {
+        fixture: {
+          baseUrl: api + "/v1",
+          apiKey: "fixture",
+          api: "openai-completions",
+          models: [{ id: "fixture" }],
+        },
+      },
+    }),
+  );
+  writeFileSync(
+    join(agentDir, "settings.json"),
+    JSON.stringify({ defaultProvider: "fixture", defaultModel: "fixture" }),
+  );
+  t.after(() => {
+    for (const key of ["HOME", "PI_CODING_AGENT_DIR", "PI_OFFLINE"]) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  });
 }
 
 // Exercise raw webhook -> durable inbox -> real Pi -> real Inkbox SDK -> reply.
@@ -141,29 +183,7 @@ test(
         );
     });
     const api = "http://127.0.0.1:" + (await listen(server));
-    const saved = { ...process.env };
-    Object.assign(process.env, {
-      HOME: home,
-      PI_CODING_AGENT_DIR: agentDir,
-      PI_OFFLINE: "1",
-    });
-    writeFileSync(
-      join(agentDir, "models.json"),
-      JSON.stringify({
-        providers: {
-          fixture: {
-            baseUrl: api + "/v1",
-            apiKey: "fixture",
-            api: "openai-completions",
-            models: [{ id: "fixture" }],
-          },
-        },
-      }),
-    );
-    writeFileSync(
-      join(agentDir, "settings.json"),
-      JSON.stringify({ defaultProvider: "fixture", defaultModel: "fixture" }),
-    );
+    configurePi(t, home, agentDir, api);
     const probe = createServer();
     const port = await listen(probe);
     await new Promise((resolve) => probe.close(resolve));
@@ -183,10 +203,6 @@ test(
       await gateway?.close();
       server.closeAllConnections();
       await new Promise((resolve) => server.close(resolve));
-      for (const key of ["HOME", "PI_CODING_AGENT_DIR", "PI_OFFLINE"]) {
-        if (saved[key] === undefined) delete process.env[key];
-        else process.env[key] = saved[key];
-      }
       rmSync(home, { force: true, recursive: true });
     });
     async function deliver(id, text) {
@@ -249,30 +265,201 @@ test(
     assert.ok(
       subscriptions.some((row) => row.event_types.includes("text.received")),
     );
+  },
+);
 
-    // Exercise precisely the production Pi invocation used after the runtime has
-    // authenticated a grant. Inspect what the actual model sees, not CLI flags.
-    await runPiTurn(
-      { ...config, projectFiles: ["project.txt"] },
-      {
-        channel: "imessage",
-        sender: "+12025550102",
-        text: "What files are available?",
-        projectGrant: "fixture-grant",
+test(
+  "real Pi edits a granted file only after approval from the original iMessage conversation",
+  { timeout: 45_000 },
+  async (t) => {
+    const home = mkdtempSync(join(tmpdir(), "pi-project-approval-"));
+    const workspace = join(home, "workspace");
+    const agentDir = join(home, "agent");
+    mkdirSync(workspace);
+    mkdirSync(agentDir);
+    const file = "project.txt";
+    const filePath = join(workspace, file);
+    writeFileSync(filePath, "Status: draft\n");
+    const modelRequests = [];
+    const finalAnswer = "I changed the status to ready.";
+    const server = createServer(async (req, res) => {
+      if (req.url !== "/v1/chat/completions") {
+        res.writeHead(404).end();
+        return;
+      }
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      modelRequests.push(JSON.parse(body));
+      if (modelRequests.length === 1) {
+        streamCompletion(res, [
+          [
+            {
+              role: "assistant",
+              tool_calls: [
+                {
+                  index: 0,
+                  id: "call_replace",
+                  type: "function",
+                  function: {
+                    name: "inkbox_project_replace",
+                    arguments: JSON.stringify({
+                      file,
+                      oldText: "draft",
+                      newText: "ready",
+                    }),
+                  },
+                },
+              ],
+            },
+            null,
+          ],
+          [{}, "tool_calls"],
+        ]);
+      } else {
+        modelResponse(res, finalAnswer);
+      }
+    });
+    const api = "http://127.0.0.1:" + (await listen(server));
+    configurePi(t, home, agentDir, api);
+
+    const owner = "+12025550102",
+      other = "+12025550103";
+    const sources = new Map();
+    const peers = { "owners-chat": owner, "other-chat": other };
+    const replies = [];
+    const identity = {
+      id: "agent",
+      imessageEnabled: true,
+      imessageNumber: { number: "+12025550101" },
+      async getIMessage(id) {
+        return sources.get(id);
       },
-      join(workspace, "project-session.jsonl"),
-      new AbortController().signal,
+      async getIMessageConversation(id) {
+        const peer = peers[id];
+        return {
+          id,
+          isGroup: false,
+          remoteNumber: peer,
+          participants: [peer],
+          assignmentId: null,
+        };
+      },
+      async sendIMessage(message) {
+        replies.push(message);
+        return { id: "reply-" + replies.length };
+      },
+    };
+    let runtime;
+    t.after(async () => {
+      await runtime?.close();
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+      rmSync(home, { recursive: true, force: true });
+    });
+    runtime = createGatewayRuntime(
+      {
+        home,
+        projectDirectory: workspace,
+        baseUrl: api,
+        projectFiles: [file],
+        trustedConversations: Object.entries(peers).map(
+          ([chat, peer]) => "imessage:" + chat + ":" + peer,
+        ),
+        piBin: resolve("node_modules/.bin/pi"),
+      },
+      { client: {}, identity },
     );
+
+    function submit(id, chat, text) {
+      const peer = peers[chat];
+      sources.set(id, {
+        id,
+        conversationId: chat,
+        direction: "inbound",
+        service: "imessage",
+        isGroup: false,
+        isBlocked: false,
+        remoteNumber: peer,
+        participants: [peer],
+        assignmentId: null,
+        content: text,
+      });
+      return runtime.acceptVerified({
+        id,
+        event_type: "imessage.received",
+        data: {
+          message: {
+            id,
+            conversation_id: chat,
+            remote_number: peer,
+            direction: "inbound",
+            sender_access: "direct",
+            content: text,
+          },
+        },
+      });
+    }
+    async function until(predicate, message) {
+      const deadline = Date.now() + 15_000;
+      while (!predicate() && Date.now() < deadline) await delay(20);
+      assert.ok(predicate(), message);
+    }
+
+    const original = "Please change the status to ready.";
+    assert.equal(submit("edit", "owners-chat", original), "accepted");
+    await until(() => replies.length > 0, "Pi did not request approval");
+    assert.equal(replies[0].conversationId, "owners-chat");
+    assert.equal(replies[0].plainReplyFallback, false);
+    assert.match(replies[0].text, /project\.txt/);
+    assert.match(replies[0].text, /draft/);
+    assert.match(replies[0].text, /ready/);
+    const approval = replies[0].text.match(/\/approve ([a-f0-9]{24})\b/i);
+    assert.ok(approval, "Expected an explicit approval command");
+    assert.match(
+      JSON.stringify(modelRequests[0].messages),
+      /Please change the status to ready/,
+    );
+    const tools = modelRequests[0].tools.map((tool) => tool.function);
+    assert.deepEqual(tools.map(({ name }) => name).sort(), [
+      "inkbox_project_read",
+      "inkbox_project_replace",
+    ]);
+    for (const tool of tools)
+      assert.deepEqual(tool.parameters.properties.file.enum, [file]);
+    assert.equal(readFileSync(filePath, "utf8"), "Status: draft\n");
+
+    // Even a different owner-granted chat with the exact command cannot release the edit.
+    assert.equal(submit("foreign", "other-chat", approval[0]), "ignored");
+    assert.equal(runtime.eventState("foreign"), "unknown");
+    const staleCode =
+      (approval[1][0] === "0" ? "1" : "0") + approval[1].slice(1);
+    assert.equal(
+      submit("stale", "owners-chat", "/approve " + staleCode),
+      "ignored",
+    );
+    assert.equal(runtime.eventState("stale"), "unknown");
+    assert.equal(readFileSync(filePath, "utf8"), "Status: draft\n");
+    assert.equal(modelRequests.length, 1);
+    assert.equal(submit("approved", "owners-chat", approval[0]), "accepted");
+    await until(
+      () => runtime.eventState("edit") === "done",
+      "The approved Pi turn never completed",
+    );
+    assert.equal(runtime.eventState("approved"), "done");
+    assert.equal(readFileSync(filePath, "utf8"), "Status: ready\n");
+    assert.equal(modelRequests.length, 2);
+    const toolResult = modelRequests[1].messages.find(
+      (message) => message.role === "tool",
+    );
+    assert.ok(toolResult, "Pi must have executed the real tool");
+    assert.equal(toolResult.tool_call_id, "call_replace");
+    assert.match(JSON.stringify(toolResult.content), /File updated\./);
     assert.deepEqual(
-      modelRequests
-        .at(-1)
-        .tools.map((tool) => tool.function.name)
-        .sort(),
-      ["inkbox_project_read", "inkbox_project_replace"],
+      replies.map(({ conversationId, text }) => [conversationId, text]),
+      [
+        ["owners-chat", replies[0].text],
+        ["owners-chat", finalAnswer],
+      ],
     );
-    for (const tool of modelRequests.at(-1).tools)
-      assert.deepEqual(tool.function.parameters.properties.file.enum, [
-        "project.txt",
-      ]);
   },
 );
