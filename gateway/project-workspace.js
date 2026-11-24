@@ -32,8 +32,14 @@ function sourceFile(name) {
     )
   )
     return false;
+  if (
+    /(?:^|\/)(?:package-lock\.json|pnpm-lock\.yaml|google-services\.json|service[-_]?account[^/]*\.json|client[-_]?secret[^/]*\.json)$/i.test(
+      name,
+    )
+  )
+    return false;
   return (
-    /^(?:\.(?:[cm]?[jt]sx?|py|go|rs|rb|java|kt|swift|scala|cs|c|cc|cpp|h|hpp|css|scss|html|sql|sh|md|toml))$/i.test(
+    /^(?:\.(?:[cm]?[jt]sx?|py|go|rs|rb|java|kt|swift|scala|cs|c|cc|cpp|h|hpp|css|scss|html|sql|sh|md|toml|json|ya?ml))$/i.test(
       extname(name),
     ) ||
     /(?:^|\/)(?:package\.json|tsconfig\.json|go\.mod|go\.sum|Makefile)$/.test(
@@ -52,6 +58,7 @@ export async function readableFiles(root, granted, workspace, signal) {
       "-c",
       "core.fsmonitor=false",
       "ls-files",
+      "--stage",
       "-z",
       "--",
       ".",
@@ -68,7 +75,13 @@ export async function readableFiles(root, granted, workspace, signal) {
       signal,
     },
   );
-  return new Set([...granted, ...stdout.split("\0").filter(sourceFile)]);
+  const files = new Set(granted);
+  for (const entry of stdout.split("\0")) {
+    // Exclude tracked symlinks, submodules and conflicted index entries.
+    const match = /^100(?:644|755) [a-f0-9]+ 0\t(.+)$/u.exec(entry);
+    if (match && sourceFile(match[1])) files.add(match[1]);
+  }
+  return files;
 }
 
 export async function readProjectFile(root, name, permitted) {

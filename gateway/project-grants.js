@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 
+import { authoredHtmlText } from "./mail-html.js";
 import { archivedSlackSource, findTextConversation } from "./source-lookups.js";
 
 const directGrant =
@@ -266,15 +267,21 @@ export function mailControl(body) {
     )
   )
     return body.trim();
+  // Check the trailing quoted block once. SDK mail bodies can be much larger
+  // than their webhook previews, including thousands of quoted lines.
+  const lastUnquoted = lines.findLastIndex(
+    (s) => s.trim() && !s.startsWith(">"),
+  );
+  const hasTrailingQuote =
+    lines.findLastIndex((s) => s.startsWith(">")) > lastUnquoted;
   const tail = lines.findIndex(
     (line, i) =>
       i > 0 &&
       (line === "-- " ||
-        (/^>/.test(line) &&
-          lines.slice(i).every((s) => !s.trim() || /^>/.test(s))) ||
-        (/^On .+ wrote:$/i.test(line) &&
-          lines.slice(i + 1).some((s) => /^>/.test(s)) &&
-          lines.slice(i + 1).every((s) => !s.trim() || /^>/.test(s))) ||
+        (i > lastUnquoted && line.startsWith(">")) ||
+        (i === lastUnquoted &&
+          hasTrailingQuote &&
+          /^On .+ wrote:$/i.test(line)) ||
         (line === "-----Original Message-----" &&
           /^From:\s+/i.test(lines[i + 1] ?? ""))),
   );
@@ -308,11 +315,11 @@ async function verifyMail(route, identity) {
     !empty(source.replyAllRecipients?.cc) ||
     typeof source.messageId !== "string" ||
     !source.messageId ||
-    /[\r\n\0]/.test(source.messageId) ||
-    typeof source.bodyText !== "string" ||
-    !source.bodyText.trim()
+    /[\r\n\0]/.test(source.messageId)
   )
     return false;
+  const body = source.bodyText?.trim() || authoredHtmlText(source.bodyHtml);
+  if (!body) return false;
   const thread = await identity.getThread(route.conversation);
   if (
     thread?.id !== route.conversation ||
@@ -324,8 +331,8 @@ async function verifyMail(route, identity) {
     !thread.messages.some((m) => m.id === route.message)
   )
     return false;
-  route.text = [source.subject, source.bodyText].filter(Boolean).join("\n");
-  route.control = mailControl(source.bodyText);
+  route.text = [source.subject, body].filter(Boolean).join("\n");
+  route.control = mailControl(body);
   route.mailParent = source.messageId;
   route.mailSubject = (source.subject ?? "")
     .replace(/[\x00-\x1f\x7f]/g, " ")
@@ -334,7 +341,7 @@ async function verifyMail(route, identity) {
   return true;
 }
 
-async function verifySlack(route, identity, client) {
+async function slackInstallation(route, identity, client) {
   const { connections } = await client.slack.listConnections(identity.id);
   const matches = connections.filter(
     (c) =>
@@ -346,13 +353,17 @@ async function verifySlack(route, identity, client) {
       c.generation > 0 &&
       (route.generation == null || c.generation === route.generation),
   );
-  if (
-    matches.length !== 1 ||
-    !matches[0].botUserId ||
-    matches[0].botUserId === route.actor
-  )
-    return false;
-  route.generation = matches[0].generation;
+  return matches.length === 1 &&
+    matches[0].botUserId &&
+    matches[0].botUserId !== route.actor
+    ? matches[0]
+    : null;
+}
+
+async function verifySlack(route, identity, client) {
+  const initial = await slackInstallation(route, identity, client);
+  if (!initial) return false;
+  route.generation = initial.generation;
   const profile = await client.slack.getUser(route.connection, route.actor);
   if (
     profile?.id !== route.actor ||
@@ -392,6 +403,10 @@ async function verifySlack(route, identity, client) {
     !source.text.trim()
   )
     return false;
+  // Each SDK read checks its own generation. Fence the sequence as a whole:
+  // profile, live DM and archive must all belong to the same installation.
+  const current = await slackInstallation(route, identity, client);
+  if (!current || current.botUserId !== initial.botUserId) return false;
   route.archivedMessage = source.id;
   route.text = source.text;
   route.control = source.text.trim();

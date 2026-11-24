@@ -32,9 +32,8 @@ async function snapshot(config, root, signal) {
     let source;
     try {
       source = await readProjectFile(config.projectDirectory, name, files);
-    } catch (error) {
-      if (granted.has(name)) throw error;
-      continue;
+    } catch {
+      throw new Error("Cannot snapshot selected test input: " + name);
     }
     total += Buffer.byteLength(source.text);
     if (total > 32 * 1024 * 1024)
@@ -46,6 +45,7 @@ async function snapshot(config, root, signal) {
       flag: "wx",
     });
   }
+  return files.size;
 }
 
 async function sandbox(root, config) {
@@ -145,6 +145,11 @@ async function sandbox(root, config) {
     const node = "(literal " + JSON.stringify(process.execPath) + ")";
     const profile =
       "(version 1)(deny default)(allow process-exec sysctl-read)" +
+      "(allow file-map-executable " +
+      read +
+      " " +
+      node +
+      ")" +
       "(allow file-read* " +
       read +
       " " +
@@ -180,7 +185,7 @@ async function supervise(config) {
   let root;
   try {
     root = await realpath(await mkdtemp(join(tmpdir(), "inkbox-pi-test-")));
-    await snapshot(config, root, life.signal);
+    const fileCount = await snapshot(config, root, life.signal);
     life.signal.throwIfAborted();
     const { binary, args, env } = await sandbox(root, config);
     return await new Promise((resolve, reject) => {
@@ -216,7 +221,9 @@ async function supervise(config) {
         resolve(
           "Project test " +
             (code === null ? "signal " + signal : "exit " + code) +
-            "\n" +
+            " (filtered snapshot: " +
+            fileCount +
+            " files)\n" +
             output.toString("utf8") +
             (truncated ? "\n[Output truncated.]" : ""),
         );

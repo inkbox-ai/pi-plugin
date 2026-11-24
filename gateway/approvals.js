@@ -24,6 +24,18 @@ export function normalizedCommand(text) {
   return raw.toLowerCase();
 }
 
+// A signed email webhook projects HTML into a flat string and can append a
+// quoted previous email. Use the leading nonce only to schedule the decision.
+// Its verb, code and answer are checked against the SDK message before use.
+export function admissionDecision(route, text) {
+  if (route.channel !== "email") return text;
+  const match = /^(\/(verify|approve|deny|answer) [a-f0-9]{24})(?:\s|$)/.exec(
+    text,
+  );
+  if (!match) return text;
+  return match[2] === "answer" ? match[1] + " ?" : match[1];
+}
+
 // Project turns are serialized. The sole pending decision belongs to one live
 // turn, never the persistent session. A restart cannot reissue or consume it.
 const DECISION_WINDOW_MS = 120_000;

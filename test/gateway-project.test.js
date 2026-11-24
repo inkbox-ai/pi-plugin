@@ -132,3 +132,33 @@ test("direct edit requires the exact approved proposal and rejects a file change
     "\uFEFFhello\nworld\nsecond\n",
   );
 });
+
+test("test-only direct grants expose no file names or empty-enum read schemas", (t) => {
+  const env = {
+    INKBOX_PI_GRANTED_FILES: "[]",
+    INKBOX_PI_CONFIRM_EDITS: "1",
+    INKBOX_PI_READ_WORKSPACE: "0",
+    INKBOX_PI_TEST_ARGV: '["npm","test"]',
+  };
+  const saved = Object.fromEntries(
+    Object.keys(env).map((k) => [k, process.env[k]]),
+  );
+  t.after(() => {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
+  Object.assign(process.env, env);
+  const names = [];
+  register({
+    registerTool(tool) {
+      names.push(tool.name);
+    },
+  });
+  assert.deepEqual(names.sort(), [
+    "inkbox_project_ask",
+    "inkbox_project_email",
+    "inkbox_project_test",
+  ]);
+});

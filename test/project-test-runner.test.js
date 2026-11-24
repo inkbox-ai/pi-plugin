@@ -41,7 +41,7 @@ test("workspace reads/search candidates exclude untracked and sensitive paths; s
     { cwd: dir },
   );
   const files = await readableFiles(dir, [], true);
-  assert.deepEqual([...files].sort(), ["linked.js", "source.js"]);
+  assert.deepEqual([...files].sort(), ["source.js"]);
   assert.equal(
     (await readProjectFile(dir, "source.js", files)).text,
     "source.js",
@@ -75,6 +75,9 @@ test(
       `
     const assert = require("node:assert/strict"), fs = require("node:fs");
     assert.equal(require("fixture-installed-dependency"),42);
+    assert.equal(require("./fixture.json").expected,require("fixture-installed-dependency"));
+    assert.equal(fs.readFileSync("settings.yaml","utf8"),"target: 42");
+    assert.equal(fs.existsSync("service-account-key.json"),false);
     assert.equal(process.env.INKBOX_PI_SENTINEL,undefined);
     assert.equal(fs.existsSync(".env"),false);
     assert.equal(fs.existsSync(".git"),false);
@@ -83,12 +86,33 @@ test(
   `,
     );
     await writeFile(join(dir, ".env"), "not for tests");
+    await writeFile(
+      join(dir, "fixture.json"),
+      JSON.stringify({ expected: 42 }),
+    );
+    await writeFile(join(dir, "settings.yaml"), "target: 42");
+    await writeFile(
+      join(dir, "service-account-key.json"),
+      '{"private_key":"not for tests"}',
+    );
     const dep = join(dir, "node_modules", "fixture-installed-dependency");
     await mkdir(dep, { recursive: true });
     await writeFile(join(dep, "index.js"), "module.exports=42;");
-    execFileSync("git", ["add", "package.json", "checks.cjs", ".env"], {
-      cwd: dir,
-    });
+    execFileSync(
+      "git",
+      [
+        "add",
+        "package.json",
+        "checks.cjs",
+        ".env",
+        "fixture.json",
+        "settings.yaml",
+        "service-account-key.json",
+      ],
+      {
+        cwd: dir,
+      },
+    );
     const old = process.env.INKBOX_PI_SENTINEL;
     t.after(() => {
       if (old === undefined) delete process.env.INKBOX_PI_SENTINEL;
@@ -104,7 +128,20 @@ test(
       new AbortController().signal,
     );
     assert.match(output, /Project test exit 0/);
+    assert.match(output, /filtered snapshot: 4 files/);
     assert.match(output, /used installed dependency/);
+    await rm(join(dir, "fixture.json"));
+    await assert.rejects(
+      runProjectTest(
+        {
+          projectDirectory: dir,
+          projectReadWorkspace: true,
+          projectTestCommand: ["npm", "test"],
+        },
+        new AbortController().signal,
+      ),
+      /Cannot snapshot selected test input: fixture.json/,
+    );
     assert.match(await readFile(join(dir, "checks.cjs"), "utf8"), /require/);
   },
 );

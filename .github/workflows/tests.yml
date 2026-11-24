@@ -55,3 +55,18 @@ jobs:
         with:
           node-version: "24"
       - run: node --test test/project-test-runner.test.js
+      - name: Diagnose a failed macOS sandbox fixture
+        if: failure()
+        run: |
+          sudo /usr/bin/log show --last 2m --style compact --info \
+            --predicate 'eventMessage BEGINSWITH "Sandbox: node(" OR eventMessage BEGINSWITH "Sandbox: sandbox-exec("' | tail -80
+          python3 - <<'PYTHON'
+          import json, pathlib
+          paths = list((pathlib.Path.home() / "Library/Logs/DiagnosticReports").glob("node*.ips"))
+          for path in sorted(paths)[-2:]:
+              text = path.read_text()
+              if "\n" not in text: continue
+              try: crash = json.loads(text.split("\n", 1)[1])
+              except ValueError: continue
+              print(path.name, crash.get("exception"), crash.get("termination"), crash.get("asi"))
+          PYTHON

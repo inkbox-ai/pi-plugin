@@ -30,72 +30,77 @@ export default function register(pi) {
   const readTarget = (name, permitted = granted) =>
     readProjectFile(process.cwd(), name, permitted);
   const file = { type: "string", enum: files };
-  pi.registerTool({
-    name: "inkbox_project_read",
-    label: "Read granted file",
-    description: "Read one project file from the owner-approved read scope.",
-    parameters: {
-      type: "object",
-      properties: { file: workspace ? { type: "string" } : file },
-      required: ["file"],
-      additionalProperties: false,
-    },
-    async execute(_, args, signal) {
-      return result(
-        (await readTarget(args.file, await inventory(signal))).text,
-      );
-    },
-  });
-  if (confirmEdits) {
+  if (files.length || workspace)
     pi.registerTool({
-      name: "inkbox_project_search",
-      label: "Search project files",
-      description:
-        "Find literal text in owner-granted files and optional tracked source. Returns matching file names, line numbers and excerpts.",
+      name: "inkbox_project_read",
+      label: "Read granted file",
+      description: "Read one project file from the owner-approved read scope.",
       parameters: {
         type: "object",
-        properties: { query: { type: "string", minLength: 1, maxLength: 256 } },
-        required: ["query"],
+        properties: { file: workspace ? { type: "string" } : file },
+        required: ["file"],
         additionalProperties: false,
       },
-      async execute(_, { query }, signal) {
-        if (typeof query !== "string" || !query || query.length > 256)
-          throw new Error("Provide a short literal search string.");
-        const allowed = await inventory(signal);
-        const matches = [];
-        let bytes = 0,
-          scanned = 0;
-        for (const name of allowed) {
-          signal?.throwIfAborted();
-          if (bytes >= 8 * 1024 * 1024 || scanned++ >= 512) {
-            matches.push("[Search stopped at scan limit.]");
-            break;
-          }
-          let text;
-          try {
-            ({ text } = await readTarget(name, allowed));
-          } catch {
-            continue;
-          } // Missing, oversized, linked, binary, or unreadable.
-          bytes += Buffer.byteLength(text);
-          const lines = text.split("\n");
-          for (const [i, line] of lines.entries()) {
-            const at = line.indexOf(query);
-            if (at < 0) continue;
-            matches.push(
-              name +
-                ":" +
-                (i + 1) +
-                ": " +
-                line.slice(Math.max(0, at - 60), at + query.length + 100),
-            );
-            if (matches.length >= 20)
-              return result(matches.join("\n") + "\n[Result limit reached.]");
-          }
-        }
-        return result(matches.join("\n") || "No matches.");
+      async execute(_, args, signal) {
+        const allowed = granted.has(args.file)
+          ? granted
+          : await inventory(signal);
+        return result((await readTarget(args.file, allowed)).text);
       },
     });
+  if (confirmEdits) {
+    if (files.length || workspace)
+      pi.registerTool({
+        name: "inkbox_project_search",
+        label: "Search project files",
+        description:
+          "Find literal text in owner-granted files and optional tracked source. Returns matching file names, line numbers and excerpts.",
+        parameters: {
+          type: "object",
+          properties: {
+            query: { type: "string", minLength: 1, maxLength: 256 },
+          },
+          required: ["query"],
+          additionalProperties: false,
+        },
+        async execute(_, { query }, signal) {
+          if (typeof query !== "string" || !query || query.length > 256)
+            throw new Error("Provide a short literal search string.");
+          const allowed = await inventory(signal);
+          const matches = [];
+          let bytes = 0,
+            scanned = 0;
+          for (const name of allowed) {
+            signal?.throwIfAborted();
+            if (bytes >= 8 * 1024 * 1024 || scanned++ >= 512) {
+              matches.push("[Search stopped at scan limit.]");
+              break;
+            }
+            let text;
+            try {
+              ({ text } = await readTarget(name, allowed));
+            } catch {
+              continue;
+            } // Missing, oversized, linked, binary, or unreadable.
+            bytes += Buffer.byteLength(text);
+            const lines = text.split("\n");
+            for (const [i, line] of lines.entries()) {
+              const at = line.indexOf(query);
+              if (at < 0) continue;
+              matches.push(
+                name +
+                  ":" +
+                  (i + 1) +
+                  ": " +
+                  line.slice(Math.max(0, at - 60), at + query.length + 100),
+              );
+              if (matches.length >= 20)
+                return result(matches.join("\n") + "\n[Result limit reached.]");
+            }
+          }
+          return result(matches.join("\n") || "No matches.");
+        },
+      });
     const action = async (ctx, signal, request) => {
       if (ctx?.mode !== "rpc")
         throw new Error("A verified gateway conversation is required.");

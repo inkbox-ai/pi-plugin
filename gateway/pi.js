@@ -30,13 +30,16 @@ export function runPiTurn(
 ) {
   const projectAccess = hasProjectGrant(config, route);
   const directEdit = projectAccess && route.channel !== "a2a";
+  const canRead = Boolean(
+    config.projectFiles?.length || (directEdit && config.projectReadWorkspace),
+  );
   const names = [
-    "inkbox_project_read",
+    ...(canRead ? ["inkbox_project_read"] : []),
     ...(config.projectFiles?.length ? ["inkbox_project_replace"] : []),
   ];
   if (directEdit) {
     names.push(
-      "inkbox_project_search",
+      ...(canRead ? ["inkbox_project_search"] : []),
       "inkbox_project_ask",
       "inkbox_project_email",
     );

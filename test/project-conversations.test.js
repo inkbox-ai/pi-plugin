@@ -1,3 +1,4 @@
+import { authoredHtmlText } from "../gateway/mail-html.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -726,6 +727,19 @@ test("Slack grants bind the installed workspace, active generation, DM peer, arc
     (await sendReply(candidate, "private", "k", { slack }, identity)).threadTs,
     candidate.subthread,
   );
+  let reads = 0;
+  const reinstalled = {
+    ...slack,
+    listConnections: async () => ({
+      connections: [{ ...connection, generation: reads++ ? 3 : 2 }],
+    }),
+  };
+  assert.equal(
+    await verifyProjectConversation(candidate, identity, {
+      slack: reinstalled,
+    }),
+    false,
+  );
   for (const overrides of [
     { getUser: async () => ({ ...user, is_bot: true }) },
     { getUser: async () => ({ ...user, team_id: "TELSE" }) },
@@ -759,4 +773,21 @@ test("Slack grants bind the installed workspace, active generation, DM peer, arc
       /destination changed/i,
     );
   }
+});
+
+test("only the authored portion of HTML mail can answer a gateway dialog", () => {
+  const token = "/approve 0123456789abcdef01234567";
+  assert.equal(
+    authoredHtmlText(
+      "<p>Yes &amp; no</p><blockquote>" + token + "</blockquote>",
+    ),
+    "Yes & no",
+  );
+  for (const html of [
+    "<blockquote>" + token + "</blockquote>",
+    '<div class="gmail_quote">' + token + "</div>",
+    "<span hidden>" + token + "</span>",
+    '<div id="divRplyFwdMsg"></div><p>' + token + "</p>",
+  ])
+    assert.equal(authoredHtmlText(html), "");
 });

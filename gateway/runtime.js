@@ -6,6 +6,7 @@ import {
   isEditControl,
   reservedEditControl,
   normalizedCommand,
+  admissionDecision,
 } from "./approvals.js";
 import { DatabaseSync } from "node:sqlite";
 import {
@@ -123,11 +124,17 @@ export function createGatewayRuntime(
       case "email":
         return identity.mailbox?.id;
       case "sms":
-        return identity.phoneNumber?.number;
+        return (
+          identity.phoneNumber?.number &&
+          digest(identity.phoneNumber.id, identity.phoneNumber.number)
+        );
       case "slack":
         return [route.connection, route.workspace, route.generation].join(":");
       case "imessage":
-        return identity.imessageNumber?.number;
+        return (
+          identity.imessageNumber?.number ??
+          (route.assignment && "assignment:" + route.assignment)
+        );
       case "whatsapp":
         return identity.whatsappNumber;
       default:
@@ -263,7 +270,8 @@ export function createGatewayRuntime(
       return "ignored";
     const text = normalizedCommand(route.control ?? route.text);
     const editControl = reservedEditControl(route, text);
-    const decision = editControl && decisionFor(route, text);
+    const decision =
+      editControl && decisionFor(route, admissionDecision(route, text));
     if (editControl && !decision) return "ignored";
     const command = decision ? "/decision" : COMMANDS.has(text) ? text : null;
     if (
@@ -502,7 +510,13 @@ export function createGatewayRuntime(
     if (
       (job.command &&
         (job.command === "/decision" || isEditControl(job.command)) &&
-        !decisionFor(route, normalizedCommand(route.control ?? route.text))) ||
+        !decisionFor(
+          route,
+          admissionDecision(
+            route,
+            normalizedCommand(route.control ?? route.text),
+          ),
+        )) ||
       (route.projectGrant && route.projectGrant !== projectGrantFor(route))
     ) {
       mark.run("ignored", job.id);
@@ -593,7 +607,11 @@ export function createGatewayRuntime(
       )
         session = undefined;
       const sourceCommand = normalizedCommand(route.control ?? route.text);
-      if (job.command === "/decision" && sourceCommand !== admittedCommand) {
+      if (
+        job.command === "/decision" &&
+        admissionDecision(route, sourceCommand) !==
+          admissionDecision(route, admittedCommand)
+      ) {
         mark.run("ignored", job.id);
         return;
       }

@@ -253,8 +253,11 @@ export function emailFixture() {
       ccAddresses: null,
       bccAddresses: null,
       subject: "Project work",
-      bodyText: text,
-      bodyHtml: null,
+      bodyText: null,
+      bodyHtml:
+        "<p>" +
+        text.replaceAll("&", "&amp;").replaceAll("<", "&lt;") +
+        "</p><blockquote>Earlier correspondence</blockquote>",
       attachmentMetadata: null,
       hasAttachments: false,
       inReplyTo: previous?.messageId ?? null,
@@ -276,7 +279,7 @@ export function emailFixture() {
           to_addresses: [own],
           cc_addresses: [],
           subject: "Project work",
-          body: text,
+          body: text + " Earlier correspondence",
         },
       },
     };
