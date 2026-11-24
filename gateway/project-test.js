@@ -251,25 +251,41 @@ export async function runProjectTest(config, signal) {
     stdio: ["ignore", "ignore", "ignore", "ipc"],
   });
   return await new Promise((resolve, reject) => {
-    let result;
+    let exited = false;
+    let disconnected = false;
     function abort() {
       if (child.connected) child.disconnect();
     }
     const finish = () => signal.removeEventListener("abort", abort);
     signal.addEventListener("abort", abort, { once: true });
+    // The supervisor sends exactly one result after removing its snapshot.
+    // Exit alone does not establish that the final IPC message has drained.
     child.once("message", (reply) => {
-      result = reply;
+      finish();
+      if (signal.aborted) reject(signal.reason);
+      else if (typeof reply?.text === "string") resolve(reply.text);
+      else reject(new Error(reply?.error || "Project test supervisor failed."));
     });
     child.once("error", (err) => {
       finish();
       reject(err);
     });
-    child.once("close", () => {
+    function endedWithoutResult() {
+      if (!exited || !disconnected) return;
       finish();
-      if (signal.aborted) reject(signal.reason);
-      else if (typeof result?.text === "string") resolve(result.text);
-      else
-        reject(new Error(result?.error || "Project test supervisor failed."));
+      reject(
+        signal.aborted
+          ? signal.reason
+          : new Error("Project test supervisor failed."),
+      );
+    }
+    child.once("exit", () => {
+      exited = true;
+      endedWithoutResult();
+    });
+    child.once("disconnect", () => {
+      disconnected = true;
+      endedWithoutResult();
     });
     child.send(
       {
