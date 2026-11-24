@@ -1,9 +1,11 @@
+import { idempotencyKey, requestKey } from "../message-key.ts";
 import { z } from "zod";
 import { runTool } from "../errors.ts";
 import { approveOutbound } from "../permissions.ts";
 import type { RegisteredTool, ToolDeps } from "./types.ts";
 
 const forwardEmailArgs = {
+  idempotencyKey,
   messageId: z.string().describe("UUID of the message to forward."),
   to: z
     .array(z.string())
@@ -78,7 +80,9 @@ export function forwardEmailTools(deps: ToolDeps): RegisteredTool[] {
             });
 
             const identity = await runtime.getIdentity();
+            ctx.abort?.throwIfAborted();
             const msg = await identity.forwardEmail(args.messageId, {
+              idempotencyKey: requestKey(ctx, args.idempotencyKey),
               to: args.to,
               cc: args.cc,
               bcc: args.bcc,

@@ -1,3 +1,4 @@
+import { idempotencyKey, requestKey } from "../message-key.ts";
 import { z } from "zod";
 import { runTool } from "../errors.ts";
 import { uploadLocalMedia } from "../media.ts";
@@ -55,6 +56,7 @@ function identityCanStartImessageConversations(identity: any): boolean {
 }
 
 const sendIMessageArgs = {
+  idempotencyKey,
   to: z
     .union([z.string(), z.array(z.string()).min(1).max(MAX_GROUP_RECIPIENTS)])
     .describe(
@@ -188,9 +190,11 @@ export function sendIMessageTools(deps: ToolDeps): RegisteredTool[] {
                 "Starting an iMessage group requires a dedicated outbound iMessage line. Reply to an existing group with `conversationId`.",
               );
             }
-            const uploaded = await uploadLocalMedia(identity, mediaPaths ?? []);
+            const uploaded = await uploadLocalMedia(identity, mediaPaths ?? [], { directory: ctx.directory, beforeUpload: () => ctx.abort?.throwIfAborted() });
             const allMediaUrls = [...uploaded, ...(mediaUrls ?? [])];
+            ctx.abort?.throwIfAborted();
             const msg = await identity.sendIMessage({
+              idempotencyKey: requestKey(ctx, args.idempotencyKey),
               ...(conversationId
                 ? { conversationId }
                 : { to: toList.length === 1 ? toList[0] : toList }),

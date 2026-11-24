@@ -1,5 +1,6 @@
-import { basename, resolve } from "node:path";
-import { readFileWithCap } from "../media.ts";
+import { basename } from "node:path";
+import { realpath } from "node:fs/promises";
+import { localMediaPath, readFileWithCap } from "../media.ts";
 import { z } from "zod";
 import { runTool } from "../errors.ts";
 import { formatJson } from "../format.ts";
@@ -152,6 +153,7 @@ export function slackTools({ runtime, config }: ToolDeps): RegisteredTool[] {
                 metadata: { textChars: args.text.length },
               });
               await ownSlackConnection(client, identity.id, args.connectionId);
+              ctx.abort?.throwIfAborted();
               result = await client.slack.sendMessage(args.connectionId, {
                 conversationId: args.conversationId,
                 text: args.text,
@@ -160,7 +162,14 @@ export function slackTools({ runtime, config }: ToolDeps): RegisteredTool[] {
               });
               break;
             case "upload_file": {
-              const filePath = resolve(ctx.directory, args.filePath);
+              const filePath = await realpath(localMediaPath(args.filePath, ctx.directory));
+              const filename = args.filename ?? basename(filePath);
+              if (!filename || filename.length > 255 || /[\x00-\x1f/\\]/u.test(filename))
+                throw new Error("Slack filenames must be simple filenames of 1 to 255 characters.");
+              // Capture the approved bytes once. A symlink updated during the
+              // confirmation cannot substitute another file before submission.
+              const content = await readFileWithCap(filePath, 10 * 1024 * 1024, "upload");
+              if (!content.length) throw new Error("Slack files must contain at least one byte.");
               await approveOutbound(ctx, config, {
                 tool: "inkbox_slack_upload_file",
                 summary: "Upload " + filePath + " to Slack",
@@ -168,15 +177,11 @@ export function slackTools({ runtime, config }: ToolDeps): RegisteredTool[] {
                   "slack:" + args.connectionId + ":" + args.conversationId,
                 ],
               });
-              const content = await readFileWithCap(
-                filePath,
-                20 * 1024 * 1024,
-                "upload",
-              );
               await ownSlackConnection(client, identity.id, args.connectionId);
+              ctx.abort?.throwIfAborted();
               result = await client.slack.uploadFile(args.connectionId, {
                 conversationId: args.conversationId,
-                filename: args.filename ?? basename(filePath),
+                filename,
                 title: args.title,
                 initialComment: args.initialComment,
                 threadTs: args.threadTs,

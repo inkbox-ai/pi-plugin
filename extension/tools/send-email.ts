@@ -1,3 +1,4 @@
+import { idempotencyKey, requestKey } from "../message-key.ts";
 import { z } from "zod";
 import { runTool } from "../errors.ts";
 import { fileToEmailAttachment } from "../media.ts";
@@ -5,6 +6,7 @@ import { approveOutbound } from "../permissions.ts";
 import type { RegisteredTool, ToolDeps } from "./types.ts";
 
 const sendEmailArgs = {
+  idempotencyKey,
   to: z
     .array(z.string().describe("Recipient email address"))
     .min(1)
@@ -57,10 +59,12 @@ export function sendEmailTools(deps: ToolDeps): RegisteredTool[] {
             const identity = await runtime.getIdentity();
             const attachments = args.attachmentPaths?.length
               ? await Promise.all(
-                  args.attachmentPaths.map((p) => fileToEmailAttachment(p)),
+                  args.attachmentPaths.map((p) => fileToEmailAttachment(p, { directory: ctx.directory })),
                 )
               : undefined;
+            ctx.abort?.throwIfAborted();
             const msg = await identity.sendEmail({
+              idempotencyKey: requestKey(ctx, args.idempotencyKey),
               to: args.to,
               subject: args.subject,
               bodyText: args.bodyText,

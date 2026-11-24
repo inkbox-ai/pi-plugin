@@ -53,6 +53,7 @@ test('signed SMS resumes Pi across gateway restarts and replies exactly once to 
     else if (url.pathname === '/api/whoami') json({auth_type:'api_key', auth_subtype:'api_key.agent_scoped.claimed'});
     else if (url.pathname === '/api/v1/identities/' || url.pathname === '/api/v1/identities') json([identity]);
     else if (url.pathname === '/api/v1/identities/fixture') json(identity);
+    else if (url.pathname === '/api/v1/webhooks/catalog') json({supports_identity_subscriptions:true});
     else if (url.pathname === '/api/v1/webhooks/subscriptions' && req.method === 'GET') {
       json({subscriptions:subscriptions.filter(row =>
         ['phone_number_id','agent_identity_id','url'].every(key => !url.searchParams.has(key) || row[key] === url.searchParams.get(key)))});
@@ -63,7 +64,7 @@ test('signed SMS resumes Pi across gateway restarts and replies exactly once to 
       replies.push({...body, key:req.headers['idempotency-key']});
       json({id:'reply-' + replies.length, direction:'outbound', ...body});
       sent.resolve();
-    } else json({error:'Unexpected fixture request: ' + req.method + ' ' + url.pathname}, 404);
+    } else json({detail:'Unexpected fixture request: ' + req.method + ' ' + url.pathname}, 404);
   });
   const api = 'http://127.0.0.1:' + await listen(server);
   const saved = {...process.env};

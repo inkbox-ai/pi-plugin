@@ -1,9 +1,24 @@
+import { realpath } from "node:fs/promises";
 import { basename } from "node:path";
 import { z } from "zod";
+import { runTool } from "../errors.ts";
 import { formatJson } from "../format.ts";
-import { readFileWithCap } from "../media.ts";
+import { localMediaPath, readFileWithCap } from "../media.ts";
 import { approveOutbound } from "../permissions.ts";
 import type { RegisteredTool, ToolDeps } from "./types.ts";
+
+async function participants(identity: Awaited<ReturnType<ToolDeps["runtime"]["getIdentity"]>>, id: string): Promise<string[]> {
+  const conversation = await identity.getWhatsAppConversation(id);
+  const members = conversation.participants;
+  if (conversation.agentIdentityId !== identity.id || conversation.id.toLowerCase() !== id.toLowerCase() ||
+      conversation.unresolvedParticipantCount !== 0 || !Array.isArray(members) || !members.length ||
+      !members.every(p => /^\+[1-9]\d{6,14}$/.test(p) && p !== conversation.localNumber) ||
+      new Set(members).size !== members.length ||
+      (conversation.isGroup ? conversation.remoteNumber !== null : members.length !== 1 || conversation.groupName != null)) {
+    throw new Error("WhatsApp requires an owned conversation with known participants.");
+  }
+  return [...members].sort();
+}
 
 export function whatsappTools(deps: ToolDeps): RegisteredTool[] {
   const page = {
@@ -148,14 +163,14 @@ export function whatsappTools(deps: ToolDeps): RegisteredTool[] {
       "Upload one authorized local file (protocol maximum 20 MiB, current limits may be lower). Retain the owned media ID.",
       { mediaPath: z.string() },
       async (args, ctx) => {
-        if (!(await ctx.confirm("Upload WhatsApp media", args.mediaPath)))
-          throw new Error("Upload was not approved.");
-        ctx.abort?.throwIfAborted();
+        const filePath = await realpath(localMediaPath(args.mediaPath, ctx.directory));
         const content = await readFileWithCap(
-          args.mediaPath,
+          filePath,
           20 * 1024 * 1024,
           "upload",
         );
+        if (!(await ctx.confirm("Upload WhatsApp media", filePath)))
+          throw new Error("Upload was not approved.");
         const identity = await deps.runtime.getIdentity();
         ctx.abort?.throwIfAborted();
         return identity.uploadWhatsAppMedia({
@@ -188,13 +203,17 @@ export function whatsappTools(deps: ToolDeps): RegisteredTool[] {
           );
         if (args.replyToMessageId && !args.conversationId)
           throw new Error("Quoted replies require a conversation.");
+        const identity = await deps.runtime.getIdentity();
+        const recipients = args.to ? [args.to] : await participants(identity, args.conversationId);
         await approveOutbound(ctx, deps.config, {
           tool: "inkbox_send_whatsapp",
           summary: "Send WhatsApp message",
-          recipients: args.to ? [args.to] : [],
-          patterns: [args.conversationId],
+          recipients,
         });
-        const identity = await deps.runtime.getIdentity();
+        if (args.conversationId && JSON.stringify(await participants(identity, args.conversationId)) !== JSON.stringify(recipients)) {
+          throw new Error("WhatsApp participants changed; review the new destination before sending.");
+        }
+        ctx.abort?.throwIfAborted();
         const { mediaId, ...target } = args;
         const key = args.idempotencyKey ?? ctx.callId;
         const message = await identity.sendWhatsApp({
@@ -261,7 +280,7 @@ export function whatsappTools(deps: ToolDeps): RegisteredTool[] {
       description,
       args,
       async execute(input, ctx) {
-        return formatJson(await execute(input, ctx));
+        return runTool(async () => formatJson(await execute(input, ctx)));
       },
     },
   }));

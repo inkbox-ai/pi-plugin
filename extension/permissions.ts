@@ -13,13 +13,19 @@ export async function approveOutbound(
 ): Promise<void> {
   ctx.abort?.throwIfAborted();
   const { approval, allowedRecipients } = config.outbound;
-  const allowed = new Set(allowedRecipients.map((v) => v.trim().toLowerCase()));
+  // Email addresses and phone numbers are matched like the channel tools.
+  // URLs and Slack selectors have case-sensitive paths or resource IDs.
+  const normalize = (value: string) => {
+    const trimmed = value.trim();
+    return /^[a-z][a-z0-9+.-]*:/i.test(trimmed) ? trimmed : trimmed.toLowerCase();
+  };
+  const allowed = new Set(allowedRecipients.map(normalize));
   if (approval === "allowlist" && !allowed.size)
     throw new Error("Outbound allowlist is empty.");
   if (
     allowed.size &&
     (!request.recipients.length ||
-      request.recipients.some((v) => !allowed.has(v.trim().toLowerCase())))
+      request.recipients.some((v) => !allowed.has(normalize(v))))
   )
     throw new Error(
       "One or more recipients are unknown or not on the outbound allowlist.",

@@ -1,0 +1,273 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import {
+  parseRoute,
+  beforeTurn,
+  sendReply,
+  subscribe,
+} from "../gateway/channels.js";
+
+const id = {
+  id: "identity",
+  agentHandle: "tester",
+  phoneNumber: { number: "+12025550111" },
+};
+function sms(text, phase = "initialization", activation = "group-A") {
+  return {
+    id: "event",
+    event_type: "text.received",
+    companion: {
+      phase,
+      channel: "phone",
+      sequence: 1,
+      scope_id: "scope",
+      conversation_id: "conversation",
+      activation_id: activation,
+    },
+    data: {
+      text_message: {
+        id: "source",
+        direction: "inbound",
+        sender_access: "direct",
+        sender_phone_number: "+12025550122",
+        local_phone_number: id.phoneNumber.number,
+        text,
+        conversation_id: "conversation",
+      },
+    },
+  };
+}
+function snapshot(route) {
+  return {
+    scopeId: "scope",
+    activationId: "group-A",
+    conversationId: "conversation",
+    channel: "phone",
+    replyContext: { channel: "phone", conversationId: "conversation" },
+    entries: [
+      {
+        id: "source",
+        author: route.sender,
+        isTrigger: true,
+        historical: false,
+      },
+    ],
+    text: "Verified earlier conversation.",
+  };
+}
+test("Companion snapshots, sponsorship, session isolation and send-time revocation", async () => {
+  const event = sms("hello");
+  const route = parseRoute(event, id, ["+12025550122"]);
+  assert(route.noControls);
+  assert.notEqual(
+    route.thread,
+    parseRoute(sms("hello", "initialization", "group-B"), id).thread,
+  );
+  const page = snapshot(route);
+  const client = {
+    companion: {
+      loadInitialization: async () => page,
+      activationMessages: async () => ({ ...page, activationId: "other" }),
+    },
+  };
+  assert(await beforeTurn(route, client, id));
+  assert.match(route.text, /Verified earlier conversation/);
+  await assert.rejects(
+    sendReply(route, "hello", "key", client, id),
+    /scope has changed/,
+  );
+  page.entries[0].author = "+12025550133";
+  assert.equal(
+    await beforeTurn(parseRoute(event, id, ["+12025550122"]), client, id),
+    false,
+  );
+});
+test("mention mode ignores historical text, URLs and lookalikes", () => {
+  for (const text of [
+    "email@example.com",
+    "hey @tester-long",
+    "https://example.com/@tester",
+  ]) {
+    const event = sms(text);
+    event.companion.history = [{ text: "@tester" }];
+    assert.equal(
+      parseRoute(event, id, [], { groupReplyMode: "mention" }),
+      null,
+    );
+  }
+  assert(
+    parseRoute(sms("Hey @tester!"), id, [], { groupReplyMode: "mention" }),
+  );
+  const event = sms("@tester");
+  event.companion.conversation_id = "another";
+  assert.equal(parseRoute(event, id), null);
+  delete event.companion;
+  event.data.text_message.sender_access = "sponsored";
+  assert.equal(
+    parseRoute(event, id, [], { companionResponseMode: "relaxed" }),
+    null,
+  );
+});
+test("only the latest owned A2A caller message can run or receive a reply", async () => {
+  const event = {
+    id: "evt",
+    event_type: "a2a.task.message",
+    data: {
+      task_id: "task",
+      context_id: "context",
+      message_id: "source",
+      caller: { identity_id: "peer", handle: "peer" },
+      parts: [{ text: "stale envelope" }],
+    },
+  };
+  const route = parseRoute(event, id);
+  const task = {
+    id: "task",
+    contextId: "context",
+    state: "working",
+    caller: { identityId: "peer", handle: "peer" },
+    target: { identityId: id.id },
+    messages: [
+      { messageId: "source", role: "caller", parts: [{ text: "current" }] },
+    ],
+  };
+  let replies = 0;
+  const agent = {
+    ...id,
+    a2aTask: async () => task,
+    a2aReply: async () => ++replies,
+  };
+  assert(await beforeTurn(route, {}, agent));
+  assert.equal(route.text, "current");
+  task.messages.push({
+    messageId: "newer",
+    role: "caller",
+    parts: [{ text: "follow-up" }],
+  });
+  assert.equal(await beforeTurn(route, {}, agent), false);
+  await sendReply(route, "late answer", "key", {}, agent);
+  assert.equal(replies, 0);
+});
+test("Slack reconnect cannot send an answer generated for the old connection", async () => {
+  const route = parseRoute(
+    {
+      id: "evt",
+      event_type: "slack.mention_received",
+      data: {
+        identity_id: id.id,
+        connection_id: "conn",
+        workspace_id: "team",
+        actor_id: "person",
+        message_ts: "10.000001",
+        conversation_id: "channel",
+        event: { text: "hi" },
+      },
+    },
+    id,
+  );
+  const conn = {
+    id: "conn",
+    identityId: id.id,
+    workspaceId: "team",
+    status: "connected",
+    generation: 2,
+  };
+  const client = {
+    slack: { listConnections: async () => ({ connections: [conn] }) },
+  };
+  assert(await beforeTurn(route, client, id));
+  conn.generation++;
+  await assert.rejects(sendReply(route, "late", "key", client, id), /changed/);
+});
+test("email uses the full verified body; iMessage cannot reply across threads", async () => {
+  const event = {
+    id: "evt",
+    event_type: "message.received",
+    data: {
+      message: {
+        id: "mail",
+        direction: "inbound",
+        mailbox_id: "box",
+        thread_id: "thread",
+        from_address: "sender@example.com",
+        snippet: "teaser",
+      },
+    },
+  };
+  const agent = {
+    ...id,
+    mailbox: { id: "box", emailAddress: "agent@example.com" },
+    getMessage: async () => ({
+      id: "mail",
+      threadId: "thread",
+      direction: "inbound",
+      mailboxId: "box",
+      fromAddress: "sender@example.com",
+      bodyText: "complete message",
+      replyAllRecipients: { to: ["sender@example.com"], cc: [] },
+    }),
+  };
+  const route = parseRoute(event, agent);
+  assert(await beforeTurn(route, {}, agent));
+  assert.equal(route.text, "complete message");
+  const im = {
+    ...id,
+    imessageEnabled: true,
+    getIMessage: async () => ({
+      id: "msg",
+      conversationId: "elsewhere",
+      direction: "inbound",
+      remoteNumber: "+12025550122",
+    }),
+  };
+  const inbound = parseRoute(
+    {
+      id: "evt",
+      event_type: "imessage.received",
+      data: {
+        message: {
+          direction: "inbound",
+          id: "msg",
+          conversation_id: "conversation",
+          sender_number: "+12025550122",
+          content: "hello",
+        },
+      },
+    },
+    im,
+  );
+  assert.equal(await beforeTurn(inbound, {}, im), false);
+  await assert.rejects(
+    sendReply(inbound, "answer", "key", {}, im),
+    /destination changed/,
+  );
+});
+
+test("subscriptions request receipts for every configured messaging channel", async () => {
+  const rows = [];
+  const subscriptions = {
+    list: async () => [],
+    create: async (row) => rows.push(row),
+  };
+  await subscribe(
+    { webhooks: { subscriptions } },
+    {
+      ...id,
+      mailbox: { id: "box" },
+      imessageEnabled: true,
+      whatsappEnabled: true,
+    },
+    "https://example.com/events",
+  );
+  const wanted = rows.flatMap((row) => row.eventTypes);
+  for (const type of [
+    "message.failed",
+    "message.bounced",
+    "text.delivery_failed",
+    "text.delivery_unconfirmed",
+    "imessage.delivery_failed",
+    "whatsapp.delivery_failed",
+    "whatsapp.delivery_unconfirmed",
+  ])
+    assert(wanted.includes(type), type);
+});

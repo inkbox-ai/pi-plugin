@@ -1,4 +1,4 @@
-import { InkboxAPIError } from "@inkbox/sdk";
+import { InkboxAPIError, getMessageRequestKey } from "@inkbox/sdk";
 
 // Translate an Inkbox SDK error into the most useful message for the calling
 // agent. Specific 403 detail strings are hoisted to plain-language guidance so
@@ -29,6 +29,8 @@ export function inkboxErrorMessage(err: unknown): string {
 }
 
 export function mapInkboxError(err: unknown): Error {
+  const key = getMessageRequestKey(err);
+  if (key) return new Error(inkboxErrorMessage(err) + " Original send key: " + key + ". Preserve this key when checking or retrying the same request.");
   if (err instanceof InkboxAPIError) return new Error(inkboxErrorMessage(err));
   if (err instanceof Error) return err;
   return new Error(String(err));

@@ -1,3 +1,4 @@
+import { idempotencyKey, requestKey } from "../message-key.ts";
 import { z } from "zod";
 import { runTool } from "../errors.ts";
 import { uploadLocalMedia } from "../media.ts";
@@ -6,6 +7,7 @@ import { approveOutbound } from "../permissions.ts";
 import type { RegisteredTool, ToolDeps } from "./types.ts";
 
 const sendSmsArgs = {
+  idempotencyKey,
   to: z
     .union([
       z
@@ -153,16 +155,18 @@ export function sendSmsTools(deps: ToolDeps): RegisteredTool[] {
             const identity = await runtime.getIdentity();
             // Uploaded local files lead, then any caller-supplied URLs.
             const uploaded = args.mediaPaths?.length
-              ? await uploadLocalMedia(identity, args.mediaPaths)
+              ? await uploadLocalMedia(identity, args.mediaPaths, { directory: ctx.directory, beforeUpload: () => ctx.abort?.throwIfAborted() })
               : [];
             const mediaUrls = [...uploaded, ...(args.mediaUrls ?? [])];
             const payload = {
+              idempotencyKey: requestKey(ctx, args.idempotencyKey),
               text: args.text,
               ...(mediaUrls.length ? { mediaUrls } : {}),
               ...(hasConversation
                 ? { conversationId }
                 : { to: recipients.length === 1 ? recipients[0] : recipients }),
             };
+            ctx.abort?.throwIfAborted();
             const msg = await identity.sendText(payload);
             const target = formatTargetSummary(msg, args);
             const status = msg.deliveryStatus ?? "unknown";

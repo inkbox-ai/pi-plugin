@@ -26,10 +26,13 @@ const CONTENT_TYPE_BY_EXTENSION: Record<string, string> = {
   ".heic": "image/heic",
 };
 
-function expandHome(p: string): string {
+export function localMediaPath(p: string, directory: string): string {
+  if (!p || /^(?:https?:|data:|file:)/i.test(p) || p.includes("\0")) {
+    throw new Error("Provide a local attachment path.");
+  }
   return p === "~" || p.startsWith("~/")
     ? path.join(os.homedir(), p.slice(1))
-    : p;
+    : path.resolve(directory, p);
 }
 
 function contentTypeFor(filename: string): string {
@@ -90,15 +93,15 @@ export interface IMessageMediaUploader {
 export async function uploadLocalMedia(
   identity: IMessageMediaUploader,
   paths: string[],
-  opts: { maxBytes?: number; beforeUpload?: () => Promise<void> } = {},
+  opts: { directory: string; maxBytes?: number; beforeUpload?: () => void },
 ): Promise<string[]> {
   const maxBytes = opts.maxBytes ?? DEFAULT_UPLOAD_MAX_BYTES;
   const urls: string[] = [];
   for (const p of paths) {
-    const resolved = expandHome(p);
+    const resolved = localMediaPath(p, opts.directory);
     const content = await readFileWithCap(resolved, maxBytes, "upload");
     const filename = path.basename(resolved);
-    await opts.beforeUpload?.();
+    opts.beforeUpload?.();
     const { mediaUrl } = await identity.uploadIMessageMedia({
       content,
       filename,
@@ -118,10 +121,10 @@ export interface EmailAttachment {
 /** Read a local file into the inline-base64 shape email sends expect. */
 export async function fileToEmailAttachment(
   filePath: string,
-  opts: { maxBytes?: number } = {},
+  opts: { directory: string; maxBytes?: number },
 ): Promise<EmailAttachment> {
   const maxBytes = opts.maxBytes ?? DEFAULT_ATTACHMENT_MAX_BYTES;
-  const resolved = expandHome(filePath);
+  const resolved = localMediaPath(filePath, opts.directory);
   const content = await readFileWithCap(resolved, maxBytes, "attach");
   const filename = path.basename(resolved);
   return {
