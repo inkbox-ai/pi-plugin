@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
-import { loadConfig, readProfile } from "./config.js";
+import { configHome, loadConfig, readProfile } from "./config.js";
 import { configure, createClient, verifiedIdentity } from "./setup.js";
 import { modelEnvironment } from "./model-env.js";
 import { prompts } from "./prompts.js";
@@ -81,18 +81,19 @@ async function foreground(config, managed) {
   process.once("SIGTERM", finish);
   process.once("SIGINT", finish);
   let gateway;
+  const marker = String(process.pid) + "\n" + (managed || "");
   const readyFile = path.join(config.home, "gateway.ready");
   try {
     gateway = await startGateway(config);
     if (managed) {
       mkdirSync(config.home, { recursive: true, mode: 0o700 });
-      writeFileSync(readyFile, String(process.pid), { mode: 0o600 });
+      writeFileSync(readyFile, marker, { mode: 0o600 });
     }
     console.log("Gateway ready" + (gateway.publicUrl ? ": " + gateway.publicUrl : ""));
     await Promise.race([done, gateway.failed]);
   } finally {
     try {
-      if (managed && gateway && readFileSync(readyFile, "utf8") === String(process.pid)) rmSync(readyFile);
+      if (managed && gateway && readFileSync(readyFile, "utf8") === marker) rmSync(readyFile);
     } finally {
       await gateway?.close();
       process.removeListener("SIGTERM", finish);
@@ -118,9 +119,11 @@ export async function main(argv) {
     if (settings.profileIdentity !== baseline.identity || settings.profileOrigin !== baseline.baseUrl) {
       throw problem("Profile identity changed. Run inkbox-pi restart to select the new profile.");
     }
-    return foreground({ ...baseline, ...settings.overrides, home }, true);
+    return foreground({ ...baseline, ...settings.overrides, home }, settings.fingerprint || "legacy");
   }
-  const config = loadConfig();
+  const managementOnly = ["stop", "uninstall", "status"].includes(command) ||
+    (command === "autostart" && [undefined, "status", "uninstall"].includes(args[0]));
+  const config = managementOnly ? {home: configHome()} : loadConfig();
   if (command === "bootstrap" || command === "setup") {
     const schema = command === "bootstrap" ? {
       identity: { type: "string" }, "base-url": { type: "string" }, "project-dir": { type: "string" },
@@ -136,8 +139,7 @@ export async function main(argv) {
       const selected = await configure(config, {
         identity: values.identity, baseUrl: values["base-url"], projectDir: values["project-dir"],
         key: values["api-key-stdin"] ? await readKey() : process.env.INKBOX_API_KEY,
-        signingKey: process.env.INKBOX_SIGNING_KEY || ((!values.identity || values.identity.replace(/^@/, "") === config.identity) &&
-          (!values["base-url"] || values["base-url"] === config.baseUrl) ? config.signingKey : undefined),
+        signingKey: process.env.INKBOX_SIGNING_KEY,
         rotate: values["rotate-signing-key"],
       }, io);
       if (!selected.ready) {

@@ -1,7 +1,7 @@
 import { statSync } from "node:fs";
 import { resolve } from "node:path";
 import { Inkbox } from "@inkbox/sdk";
-import { normalizeOrigin, readProfile, saveProfile } from "./config.js";
+import { normalizeOrigin, readProfile, saveProfile, sharedSigningKey, signingKeyDigest } from "./config.js";
 import { problem } from "./errors.js";
 
 export async function verifiedIdentity(client, requested) {
@@ -16,7 +16,14 @@ export async function verifiedIdentity(client, requested) {
   return client.getIdentity(identities[0].agentHandle);
 }
 
-export const createClient = (apiKey, baseUrl) => new Inkbox({ apiKey, baseUrl });
+/** @param {string} apiKey @param {string | undefined} baseUrl @param {string} [userAgentPrefix] */
+export function createClient(apiKey, baseUrl, userAgentPrefix = undefined) {
+  const client = new Inkbox({ apiKey, baseUrl, userAgentPrefix });
+  // The SDK may try an optional configured vault key during construction.
+  // Messaging must still work if that key is stale; vault tools unlock explicitly.
+  void client.ready().catch(() => {});
+  return client;
+}
 
 async function resolveKey(options, previous, io, clientFor) {
   const { baseUrl, requested, key } = options;
@@ -119,12 +126,15 @@ export async function configure(config, options, io, clientFor = createClient) {
   }
 
   const status = await identity.getSigningKeyStatus();
-  let signingKey = options.signingKey || (sameProfile && previous.signingKey);
-  const rotated = status.createdAt && previous.signingKeyCreatedAt &&
+  const rotated = sameProfile && status.createdAt && previous.signingKeyCreatedAt &&
     new Date(status.createdAt).toISOString() !== previous.signingKeyCreatedAt;
-  if (rotated && !options.signingKey) signingKey = undefined;
+  if (rotated && previous.signingKey) profile.invalidSigningKeyDigest = signingKeyDigest(previous.signingKey);
+  const usable = candidate => candidate && signingKeyDigest(candidate) !== profile.invalidSigningKeyDigest;
+  let signingKey = [options.signingKey, sameProfile && previous.signingKey,
+    sharedSigningKey(baseUrl, identity.agentHandle)].find(usable);
   if (status.configured && !signingKey && io && !options.rotate) {
-    signingKey = await io.secret("Existing webhook signing key (leave empty to skip the gateway)");
+    const entered = await io.secret("Existing webhook signing key (leave empty to skip the gateway)");
+    if (usable(entered)) signingKey = entered;
   }
   if (status.configured && !signingKey && !options.rotate) {
     delete profile.signingKey;

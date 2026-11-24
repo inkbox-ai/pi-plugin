@@ -52,3 +52,45 @@ test("a mismatched agent-scoped key cannot replace a working profile", async t =
   await assert.rejects(configure(config, { identity: "other", key: "different" }, undefined, clientFor), /does not match/);
   assert.deepEqual(readProfile(home), { identity: "prior" });
 });
+
+test("bootstrap cannot restamp a locally saved signing key after server rotation", async t => {
+  const { createServer } = await import("node:http");
+  const { once } = await import("node:events");
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const { fileURLToPath } = await import("node:url");
+  const { mkdirSync, writeFileSync } = await import("node:fs");
+  const { home } = fixture(t);
+  const identity = { agent_handle: "pi-example", id: "agent-id" };
+  const api = createServer((req, res) => {
+    const route = req.url.replace(/\/$/, "");
+    let body;
+    if (route === "/api/whoami") body = { auth_type: "api_key", auth_subtype: "api_key.agent_scoped.claimed" };
+    else if (route === "/api/v1/identities") body = [identity];
+    else if (route === "/api/v1/identities/pi-example") body = identity;
+    else if (route === "/api/v1/identities/pi-example/signing-key" && req.method === "GET")
+      body = { configured: true, created_at: "2026-01-02T00:00:00Z" };
+    else { res.writeHead(404).end(); return; }
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(body));
+  });
+  api.listen(0, "127.0.0.1");
+  await once(api, "listening");
+  t.after(() => api.close());
+  const baseUrl = "http://127.0.0.1:" + api.address().port;
+  saveProfile(home, { baseUrl, identity: identity.agent_handle, apiKey: "test-key", signingKey: "stale", signingKeyCreatedAt: "2026-01-01T00:00:00.000Z" });
+  const script = fileURLToPath(new URL("../bin/inkbox-pi.js", import.meta.url));
+  const env = { HOME: home, INKBOX_PI_HOME: home, PATH: process.env.PATH };
+  const bootstrap = () => promisify(execFile)(process.execPath, [script, "bootstrap"], { env });
+  await assert.rejects(bootstrap, error => error.code === 2 && /requires_human/.test(error.stdout));
+  assert.equal(readProfile(home).signingKey, undefined);
+  mkdirSync(path.join(home, ".inkbox"));
+  const shared = key => writeFileSync(path.join(home, ".inkbox/config"),
+    "base_url = " + baseUrl + "\nidentity = pi-example\nsigning_key = " + key + "\n");
+  shared("stale");
+  await assert.rejects(bootstrap, error => error.code === 2 && /requires_human/.test(error.stdout));
+  assert.equal(loadConfig(env).signingKey, "");
+  shared("replacement");
+  const completed = await bootstrap();
+  assert.equal(JSON.parse(completed.stdout).status, "configured");
+  assert.equal(readProfile(home).signingKey, "replacement");
+});

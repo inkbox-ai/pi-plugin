@@ -64,3 +64,28 @@ test("a service only retains model credentials explicitly selected by its owner"
   assert.deepEqual(modelEnvironment({ INKBOX_PI_MODEL_ENV: "" }, { XAI_API_KEY: "old" }), {});
   assert.throws(() => modelEnvironment({ ...env, INKBOX_PI_MODEL_ENV: "UNRELATED" }));
 });
+
+test("a separate Pi profile does not depend on a valid shared SDK origin", async t => {
+  const { mkdirSync, writeFileSync } = await import("node:fs");
+  const account = home(t), dir = path.join(account, ".inkbox-pi");
+  mkdirSync(path.join(account, ".inkbox"));
+  writeFileSync(path.join(account, ".inkbox/config"), "identity = shared\nbase_url = invalid\napi_key = other\n");
+  saveProfile(dir, {baseUrl:"https://example.test", identity:"local", apiKey:"selected"});
+  const config = loadConfig({HOME:account, INKBOX_PI_HOME:dir});
+  assert.equal(config.apiKey, "selected");
+});
+
+test("teardown works even when the profile cannot be parsed", async t => {
+  const { mkdirSync, writeFileSync } = await import("node:fs");
+  const { spawnSync } = await import("node:child_process");
+  const dir = home(t);
+  const profile = path.join(dir, ".inkbox-pi");
+  mkdirSync(profile);
+  writeFileSync(path.join(profile, "config.json"), "bad json");
+  const {fileURLToPath} = await import("node:url");
+  const bin = fileURLToPath(new URL("../bin/inkbox-pi.js", import.meta.url));
+  const result = spawnSync(process.execPath, [bin, "stop"], {
+    env: {...process.env, HOME:dir, INKBOX_PI_HOME:profile}, encoding:"utf8"
+  });
+  assert.equal(result.status, 0, result.stderr);
+});

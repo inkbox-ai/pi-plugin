@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 export function configHome(env = process.env) {
   return path.resolve(env.INKBOX_PI_HOME || path.join(env.HOME || homedir(), ".inkbox-pi"));
@@ -52,18 +52,37 @@ function readSharedProfile(accountHome) {
   return profile;
 }
 
+export function signingKeyDigest(key) {
+  return createHash("sha256").update(key).digest("hex");
+}
+
+function optionalOrigin(value) {
+  try { return normalizeOrigin(value || "https://inkbox.ai"); }
+  catch { return undefined; }
+}
+
+export function sharedSigningKey(baseUrl, identity, env = process.env) {
+  const shared = readSharedProfile(env.HOME || homedir());
+  if (identity && (shared.identity || "").replace(/^@/, "") === identity &&
+      optionalOrigin(shared.base_url) === baseUrl) return shared.signing_key;
+}
+
 export function loadConfig(env = process.env) {
   const home = configHome(env);
   const saved = readProfile(home);
   const shared = readSharedProfile(env.HOME || homedir());
-  const sharedOrigin = normalizeOrigin(shared.base_url || "https://inkbox.ai");
+  const sharedOrigin = optionalOrigin(shared.base_url);
   const sharedIdentity = (shared.identity || "").replace(/^@/, "");
-  const baseUrl = normalizeOrigin(env.INKBOX_BASE_URL || saved.baseUrl || sharedOrigin);
+  const baseUrl = normalizeOrigin(env.INKBOX_BASE_URL || saved.baseUrl || shared.base_url || "https://inkbox.ai");
   const sameOrigin = normalizeOrigin(saved.baseUrl || "https://inkbox.ai") === baseUrl;
   const identity = (env.INKBOX_IDENTITY || env.INKBOX_AGENT_IDENTITY || env.INKBOX_AGENT_HANDLE ||
     (sameOrigin && saved.identity) || (sharedOrigin === baseUrl && sharedIdentity) || "").replace(/^@/, "");
   const sharedMatches = baseUrl === sharedOrigin && identity === sharedIdentity;
   const sameIdentity = sameOrigin && identity === saved.identity;
+  const signingCandidate = env.INKBOX_SIGNING_KEY || (sameIdentity && saved.signingKey) ||
+    (sharedMatches && sharedIdentity && shared.signing_key) || "";
+  const signingKey = signingCandidate && sameIdentity && saved.invalidSigningKeyDigest === signingKeyDigest(signingCandidate)
+    ? "" : signingCandidate;
   const publicUrl = env.INKBOX_PI_PUBLIC_URL || (sameIdentity && saved.publicUrl) || undefined;
   const port = Number(env.INKBOX_PI_PORT || saved.port || (publicUrl ? 18793 : 0));
   if (!Number.isInteger(port) || port < 0 || port > 65535 || (publicUrl && port === 0)) {
@@ -84,8 +103,7 @@ export function loadConfig(env = process.env) {
     trustedAgentIds: listSetting("INKBOX_PI_TRUSTED_AGENT_IDS", "trustedAgentIds"),
     projectFiles: listSetting("INKBOX_PI_PROJECT_FILES", "projectFiles"),
     apiKey: env.INKBOX_API_KEY || (sameIdentity && saved.apiKey) || (sharedMatches && shared.api_key) || "",
-    signingKey: env.INKBOX_SIGNING_KEY || (sameIdentity && saved.signingKey) ||
-      (sharedMatches && sharedIdentity && shared.signing_key) || "",
+    signingKey,
     projectDirectory: path.resolve(env.INKBOX_PI_PROJECT_DIR || saved.projectDirectory || process.cwd()),
     piBin: env.INKBOX_PI_BIN || saved.piBin || "pi",
     tunnelName: env.INKBOX_PI_TUNNEL_NAME || (sameIdentity && saved.tunnelName) || identity,

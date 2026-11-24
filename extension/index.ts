@@ -179,12 +179,8 @@ export default function inkbox(pi: ExtensionAPI) {
       "Show setup and gateway commands for this package installation",
     handler: async (_args, ctx) => {
       const quote = (arg: string) => "'" + arg.replaceAll("'", "'\\''") + "'";
-      const command = [
-        process.execPath,
-        fileURLToPath(new URL("../bin/inkbox-pi.js", import.meta.url)),
-      ]
-        .map(quote)
-        .join(" ");
+      const script = fileURLToPath(new URL("../bin/inkbox-pi.js", import.meta.url));
+      const command = "node " + quote(script);
       ctx.ui.notify(
         [
           "Run in a separate terminal:",

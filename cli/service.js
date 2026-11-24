@@ -72,15 +72,18 @@ function queryService(config) {
   throw problem("Background services require macOS or Linux. Use inkbox-pi run.");
 }
 
-function isReady(config, pid) {
+function isReady(config, pid, fingerprint) {
   if (!pid) return false;
-  try { return readFileSync(path.join(config.home, "gateway.ready"), "utf8") === String(pid); }
+  try {
+    const [owner, loaded] = readFileSync(path.join(config.home, "gateway.ready"), "utf8").split("\n");
+    return owner === String(pid) && (!fingerprint || loaded === fingerprint);
+  }
   catch { return false; }
 }
 
-export function serviceStatus(config) {
+export function serviceStatus(config, fingerprint) {
   const { pid, enabled } = queryService(config);
-  return { running: pid > 0, ready: isReady(config, pid), autostart: enabled };
+  return { running: pid > 0, ready: isReady(config, pid, fingerprint), autostart: enabled };
 }
 
 // Copy only settings required by this profile, not an arbitrary caller's
@@ -94,21 +97,30 @@ function saveServiceSettings(config) {
   overrides.projectDirectory = config.projectDirectory;
   const serviceDir = path.join(home, "service");
   const previous = readProfile(serviceDir);
-  const sameOwner = previous.profileIdentity === baseline.identity && previous.profileOrigin === baseline.baseUrl;
+  const sameOwner = previous.selectedIdentity === config.identity && previous.selectedOrigin === config.baseUrl;
   const modelEnv = modelEnvironment(process.env, sameOwner ? previous.modelEnv : undefined);
-  saveProfile(serviceDir, {
-    modelEnv,
+  const settings = {
+    selectedIdentity: config.identity, selectedOrigin: config.baseUrl, modelEnv,
     overrides, profileIdentity: baseline.identity, profileOrigin: baseline.baseUrl,
     path: process.env.PATH, agentDir: process.env.PI_CODING_AGENT_DIR,
-  });
+  };
+  const fingerprint = createHash("sha256").update(JSON.stringify([config, settings, process.execPath, entry])).digest("hex");
+  saveProfile(serviceDir, { ...settings, fingerprint });
+  return fingerprint;
 }
 
 export async function service(action, config) {
   const files = serviceFiles(config.home);
   const starting = ["start", "restart", "install"].includes(action);
+  let fingerprint;
   if (starting) {
     if (!config.apiKey || !config.identity || !config.signingKey) throw problem("Run inkbox-pi setup before starting the gateway.");
-    saveServiceSettings(config);
+    fingerprint = saveServiceSettings(config);
+    if (action === "start") {
+      const current = serviceStatus(config, fingerprint);
+      if (current.ready) return;
+      action = "restart";
+    }
   }
   if (process.platform === "linux") {
     const systemctl = (...args) => invoke("systemctl", ["--user", ...args]);
@@ -143,7 +155,7 @@ export async function service(action, config) {
   if (starting) {
     const deadline = Date.now() + 30_000;
     while (Date.now() < deadline) {
-      if (serviceStatus(config).ready) return;
+      if (serviceStatus(config, fingerprint).ready) return;
       await delay(400);
     }
     throw problem("Service requested but gateway not ready. Check inkbox-pi status and the service log.");

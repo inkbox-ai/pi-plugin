@@ -1,9 +1,9 @@
 import { createServer } from "node:http";
 import { once } from "node:events";
-import { Inkbox, verifyWebhook } from "@inkbox/sdk";
+import { verifyWebhook } from "@inkbox/sdk";
 import { connect } from "@inkbox/sdk/tunnels/connect";
 import { InvalidExternalEvent } from "./external.js";
-import { verifiedIdentity } from "../cli/setup.js";
+import { createClient, verifiedIdentity } from "../cli/setup.js";
 import { subscribe } from "./channels.js";
 import { createGatewayRuntime } from "./runtime.js";
 export { createGatewayRuntime };
@@ -70,7 +70,7 @@ export async function startGateway(config) {
   ) {
     throw new Error("A public URL needs HTTPS and a fixed local port.");
   }
-  const client = new Inkbox({ apiKey: config.apiKey, baseUrl: config.baseUrl });
+  const client = createClient(config.apiKey, config.baseUrl);
   const identity = await verifiedIdentity(client, config.identity);
   const runtime = createGatewayRuntime(config, { client, identity });
   const server = createServer(
