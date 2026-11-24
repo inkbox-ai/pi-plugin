@@ -94,7 +94,11 @@ export async function startGateway(config) {
     throw startupProblem("signing key verification", error);
   }
   try {
-    runtime = createGatewayRuntime(config, { client, identity });
+    runtime = createGatewayRuntime(
+      config,
+      { client, identity },
+      { paused: true },
+    );
   } catch (error) {
     throw startupProblem("state initialization", error);
   }
@@ -170,6 +174,7 @@ export async function startGateway(config) {
     const webhook = new URL("/webhook", publicUrl).href;
     stage = "webhook subscription setup";
     await subscribe(client, identity, webhook, config);
+    runtime.start();
     return { publicUrl, failed, close };
   } catch (error) {
     await close();

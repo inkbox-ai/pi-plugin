@@ -5,6 +5,16 @@ import { encodeEditProposal } from "./pi-rpc.js";
 // Such messages are never instructions for the model.
 export const isEditControl = (text) => /^\/(approve|deny)(?:\s|$)/i.test(text);
 
+// A copied gateway token should not become a model prompt on a different
+// channel. Ordinary prose beginning with "/approve" isn't a gateway control.
+export function reservedEditControl(route, text) {
+  return (
+    isEditControl(text) &&
+    ((route.projectGrant && ["imessage", "whatsapp"].includes(route.channel)) ||
+      /^\/(?:approve|deny)\s+[a-f0-9]{24}$/i.test(text))
+  );
+}
+
 // Project turns are serialized. The sole pending decision belongs to one live
 // turn, never the persistent session. A restart cannot reissue or consume it.
 const DECISION_WINDOW_MS = 120_000;
@@ -12,28 +22,42 @@ const DECISION_WINDOW_MS = 120_000;
 export function createEditApprovals() {
   let pending;
 
+  function controlThread(route) {
+    if (
+      !pending?.live() ||
+      !route.projectGrant ||
+      route.projectGrant !== pending.route.projectGrant ||
+      route.channel !== pending.route.channel ||
+      route.conversation !== pending.route.conversation ||
+      route.assignment !== pending.route.assignment ||
+      route.sender !== pending.route.sender
+    )
+      return;
+    // Native Reply can make the original message or the prompt the thread root.
+    if (
+      route.thread === pending.route.thread ||
+      (route.subthread &&
+        (route.subthread === pending.route.message ||
+          route.subthread === pending.promptId))
+    )
+      return pending.route.thread;
+  }
+
   function matches(route, command) {
     return Boolean(
-      pending &&
-        pending.live() &&
+      controlThread(route) &&
         !pending.consumed &&
-        route.projectGrant === pending.route.projectGrant &&
-        route.channel === pending.route.channel &&
-        route.conversation === pending.route.conversation &&
-        route.assignment === pending.route.assignment &&
-        (route.thread === pending.route.thread ||
-          // A phone's native Reply action can create a subthread when the
-          // original message was top-level. Only these two roots belong to it.
-          (route.subthread &&
-            (route.subthread === pending.route.message ||
-              route.subthread === pending.promptId))) &&
-        route.sender === pending.route.sender &&
         (command === pending.approve || command === pending.deny),
     );
   }
 
   return {
     matches,
+    controlThread,
+    failedPrompt(channel, message) {
+      if (pending?.route.channel === channel && pending.promptId === message)
+        pending.rejectEdit();
+    },
     consume(route, command) {
       if (!matches(route, command)) return false;
       pending.consumed = true;
@@ -41,7 +65,14 @@ export function createEditApprovals() {
       else pending.decision.resolve(route);
       return true;
     },
-    async request({ route, proposal, signal, send, verify }) {
+    async request({
+      route,
+      proposal,
+      signal,
+      send,
+      verify,
+      remainingMs = DECISION_WINDOW_MS,
+    }) {
       if (pending || signal.aborted) return false;
       let encoded;
       try {
@@ -54,11 +85,13 @@ export function createEditApprovals() {
       const deny = "/deny " + code;
       const decision = Promise.withResolvers();
       const result = Promise.withResolvers();
-      const deadline = performance.now() + DECISION_WINDOW_MS;
-      const lifetime = AbortSignal.any([
-        signal,
-        AbortSignal.timeout(DECISION_WINDOW_MS),
-      ]);
+      const seconds = Math.floor(
+        Math.min(DECISION_WINDOW_MS, remainingMs) / 1000,
+      );
+      if (!Number.isFinite(seconds) || seconds < 1) return false;
+      const windowMs = seconds * 1000;
+      const deadline = performance.now() + windowMs;
+      const lifetime = AbortSignal.any([signal, AbortSignal.timeout(windowMs)]);
       const live = () => !lifetime.aborted && performance.now() < deadline;
       const request = {
         route,
@@ -80,7 +113,7 @@ export function createEditApprovals() {
       const prompt =
         "Pi requests one exact file edit (JSON):\n" +
         encoded +
-        "\nReply within 2 minutes:\n" +
+        `\nReply within ${seconds} seconds:\n` +
         approve +
         "\nor\n" +
         deny;

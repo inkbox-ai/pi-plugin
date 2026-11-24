@@ -1,4 +1,8 @@
-import { verifyProjectConversation } from "./project-grants.js";
+import {
+  phoneSubthread,
+  samePhoneThread,
+  verifyProjectConversation,
+} from "./project-grants.js";
 import {
   attachments,
   describeMedia,
@@ -215,8 +219,11 @@ export function parseRoute(event, identity, allowedSenders = [], options = {}) {
         channel = "imessage";
         sender = clean(record.sender_number) || clean(record.remote_number);
         conversation = clean(record.conversation_id);
-        subthread =
-          clean(record.thread_root_message_id) || clean(record.thread_id);
+        subthread = phoneSubthread(
+          message,
+          clean(record.thread_root_message_id) || clean(record.thread_id),
+          record.reply_to_message_id,
+        );
         text = [record.content, media.length && "[Attachment]"]
           .filter(Boolean)
           .join("\n");
@@ -226,8 +233,11 @@ export function parseRoute(event, identity, allowedSenders = [], options = {}) {
         channel = "whatsapp";
         sender = clean(record.sender_number) || clean(record.remote_number);
         conversation = clean(record.conversation_id);
-        subthread =
-          clean(record.thread_root_message_id) || clean(record.thread_id);
+        subthread = phoneSubthread(
+          message,
+          clean(record.thread_root_message_id) || clean(record.thread_id),
+          record.reply_to_message_id,
+        );
         text = [record.content, media.length && "[Attachment]"]
           .filter(Boolean)
           .join("\n");
@@ -588,8 +598,7 @@ async function messagingSource(route, identity) {
           route.companion?.activation
         )) ||
       (source.senderNumber || source.remoteNumber) !== route.sender ||
-      (source.threadRootMessageId || source.threadId || "") !==
-        (route.subthread || "")
+      !samePhoneThread(route, source)
     )
       return false;
     refreshMedia(route, source.media);

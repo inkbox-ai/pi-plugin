@@ -72,6 +72,8 @@ async function fixture(t) {
       participants: [sender],
       assignmentId: null,
       content: sourceText,
+      threadRootMessageId:
+        record.thread_root_message_id ?? record.thread_id ?? id,
     });
     return runtime.acceptVerified({
       id,
@@ -84,6 +86,8 @@ async function fixture(t) {
           remote_number: sender,
           direction: "inbound",
           sender_access: "direct",
+          thread_root_message_id:
+            record.thread_root_message_id ?? record.thread_id ?? id,
           ...record,
         },
       },
@@ -110,6 +114,12 @@ async function fixture(t) {
   };
   return {
     submit,
+    notice: (id) =>
+      runtime.acceptVerified({
+        id: "failed-" + id,
+        event_type: "imessage.delivery_failed",
+        data: { message: { id, direction: "outbound" } },
+      }),
     until,
     sources,
     prompt,
@@ -211,7 +221,7 @@ test(
     f.submit("work", "fix it");
     const command = (await f.prompt.promise).match(/\/approve [0-9a-f]{24}/)[0];
     f.delivery.resolve();
-    f.submit("stop", "/stop");
+    f.submit("stop", "/stop", { record: { thread_root_message_id: "work" } });
     await f.until("stop", "done");
     assert.equal(await f.result.promise, false);
     await f.until("work", "uncertain");
@@ -269,3 +279,27 @@ test("a timed-out prompt and a host cancellation settle even when delivery never
     });
   }
 });
+
+test(
+  "a failed approval-prompt callback releases the turn without editing, before or after the send returns",
+  { timeout: 5000 },
+  async (t) => {
+    for (const early of [true, false])
+      await t.test(early ? "early callback" : "late callback", async (t) => {
+        const f = await fixture(t);
+        f.submit("work", "edit it");
+        const command = (await f.prompt.promise).match(
+          /\/approve [0-9a-f]{24}/,
+        )[0];
+        if (early) f.notice("prompt");
+        f.delivery.resolve({ id: "prompt" });
+        if (!early) {
+          await delay(5);
+          f.notice("prompt");
+        }
+        assert.equal(await f.result.promise, false);
+        await f.until("work", "done");
+        assert.equal(f.submit("stale", command), "ignored");
+      });
+  },
+);

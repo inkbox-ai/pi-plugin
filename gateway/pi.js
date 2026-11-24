@@ -62,12 +62,21 @@ export function runPiTurn(config, route, sessionFile, signal, confirmEdit) {
       failure;
     const decoder = new StringDecoder("utf8");
     const lifetime = new AbortController();
+    const turnTimeoutMs = 300_000;
+    const turnDeadline = performance.now() + turnTimeoutMs;
     const rpc =
       directEdit &&
       createEditRpc(
         child.stdin,
         config.projectFiles,
-        confirmEdit,
+        confirmEdit &&
+          ((proposal, signal) =>
+            // Leave time for Pi to consume the decision and finish its answer.
+            confirmEdit(
+              proposal,
+              signal,
+              turnDeadline - performance.now() - 10_000,
+            )),
         lifetime.signal,
       );
     function stop() {
@@ -77,7 +86,7 @@ export function runPiTurn(config, route, sessionFile, signal, confirmEdit) {
     const timer = setTimeout(() => {
       failure = hostProblem("pi-timeout");
       stop();
-    }, 300_000);
+    }, turnTimeoutMs);
     signal.addEventListener("abort", stop, { once: true });
     if (signal.aborted) stop();
     child.once("error", () => reject(hostProblem("pi-binary")));

@@ -96,7 +96,9 @@ export default function register(pi) {
           (await ctx.ui.confirm(PROJECT_EDIT_TITLE, proposal, { signal })) !==
             true
         )
-          throw new Error("Exact edit was not approved. File unchanged.");
+          throw new Error(
+            "Exact edit was not approved. File unchanged. The request may have been denied, expired or undelivered; do not assume the sender declined.",
+          );
       }
       signal?.throwIfAborted();
       const temp = join(dirname(target), ".inkbox-pi-edit-" + randomUUID());

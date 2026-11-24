@@ -69,6 +69,21 @@ export function openProjectGrants(db, config) {
   };
 }
 
+// Quoting a previously top-level message can assign the parent its own ID
+// as its thread root. It is still the same source, not a different thread.
+export function phoneSubthread(message, root, parent) {
+  return !parent && root === message ? "" : root || "";
+}
+
+export function samePhoneThread(route, source) {
+  const root = source.threadRootMessageId || source.threadId || "";
+  return (
+    root === (route.subthread || "") ||
+    phoneSubthread(source.id, root, source.replyToMessageId) ===
+      (route.subthread || "")
+  );
+}
+
 // Inkbox's identity-scoped resource reads are authoritative for both halves of
 // the binding. Never run a project turn using a webhook's copy of the prompt.
 export async function verifyProjectConversation(route, identity) {
@@ -96,8 +111,7 @@ export async function verifyProjectConversation(route, identity) {
     (source.senderNumber != null && source.senderNumber !== route.sender) ||
     source.isGroup !== false ||
     destination.isGroup !== false ||
-    (source.threadRootMessageId || source.threadId || "") !==
-      (route.subthread || "") ||
+    !samePhoneThread(route, source) ||
     typeof source.content !== "string" ||
     !source.content.trim()
   )

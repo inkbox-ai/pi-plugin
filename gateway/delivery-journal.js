@@ -9,13 +9,16 @@ export function openDeliveryJournal(db) {
     CREATE TABLE IF NOT EXISTS delivery_resets(thread TEXT PRIMARY KEY, through_row INTEGER NOT NULL);
     CREATE INDEX IF NOT EXISTS outbound_job ON outbound(job);`);
   const pending = db.prepare(`
-    SELECT j.id, n.state FROM jobs j JOIN outbound o ON o.job=j.id
-    JOIN notices n ON n.channel=o.channel AND n.message=o.message
-    LEFT JOIN delivery_seen s ON s.job=j.id
-    WHERE j.thread=? AND j.actor=? AND j.command IS NULL AND j.rowid<?
-      AND j.rowid>COALESCE((SELECT through_row FROM delivery_resets WHERE thread=j.thread),0)
-      AND (s.state IS NULL OR s.state!=n.state)
-    ORDER BY j.rowid LIMIT 25`);
+    SELECT id, state FROM (
+      SELECT j.id, j.rowid AS position, s.state AS seen,
+        COALESCE(n.state, CASE WHEN j.answer IS NOT NULL AND o.job IS NULL
+          AND j.state IN ('failed','uncertain') THEN j.state END) AS state
+      FROM jobs j LEFT JOIN outbound o ON o.job=j.id
+      LEFT JOIN notices n ON n.channel=o.channel AND n.message=o.message
+      LEFT JOIN delivery_seen s ON s.job=j.id
+      WHERE j.thread=? AND j.actor=? AND j.command IS NULL AND j.rowid<?
+        AND j.rowid>COALESCE((SELECT through_row FROM delivery_resets WHERE thread=j.thread),0))
+    WHERE state IS NOT NULL AND state IS NOT seen ORDER BY position LIMIT 25`);
   return {
     isEarly(event) {
       return db

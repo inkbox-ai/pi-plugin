@@ -1,5 +1,9 @@
 import { journalDirectory } from "./journal.js";
-import { createEditApprovals, isEditControl } from "./approvals.js";
+import {
+  createEditApprovals,
+  isEditControl,
+  reservedEditControl,
+} from "./approvals.js";
 import { DatabaseSync } from "node:sqlite";
 import {
   mkdirSync,
@@ -54,6 +58,7 @@ function flush(path) {
 export function createGatewayRuntime(
   config,
   { client, identity, turn = runPiTurn, reply = sendReply, logger = console },
+  { paused = false } = {},
 ) {
   if (!identity?.id || !config.home)
     throw problem("Gateway identity and state directory required.");
@@ -175,6 +180,8 @@ export function createGatewayRuntime(
           delivery.defer(event.id, notice.channel, notice.message);
         }
       });
+      if (notice.state === "failed")
+        approvals.failedPrompt(notice.channel, notice.message);
       return "accepted";
     }
     const route =
@@ -183,7 +190,28 @@ export function createGatewayRuntime(
         : parseRoute(event, identity, config.allowedSenders, config);
     if (!route) return "ignored";
     // Distinct subscriptions can deliver a single source message under different event IDs.
-    const id = digest(identity.id, route.channel, route.thread, route.message);
+    let id = digest(identity.id, route.channel, route.thread, route.message);
+    // Older journals used each top-level phone message's own ID as a subthread.
+    // Preserve the original receipt if that source is replayed after upgrading.
+    if (
+      !route.subthread &&
+      !route.companion &&
+      ["imessage", "whatsapp"].includes(route.channel)
+    ) {
+      const legacyThread = digest(
+        route.channel,
+        route.connection,
+        route.conversation,
+        route.message,
+      );
+      const legacy = digest(
+        identity.id,
+        route.channel,
+        legacyThread,
+        route.message,
+      );
+      if (stateOf.get(legacy)) id = legacy;
+    }
     route.projectGrant = projectGrantFor(route);
     if (route.projectGrant || route.channel === "a2a")
       route.thread = digest(
@@ -213,7 +241,7 @@ export function createGatewayRuntime(
     )
       return "ignored";
     const text = (route.control ?? route.text).trim().toLowerCase();
-    const editControl = isEditControl(text);
+    const editControl = reservedEditControl(route, text);
     if (editControl && !approvals.matches(route, text)) return "ignored";
     const command = COMMANDS.has(text) || editControl ? text : null;
     if (
@@ -236,7 +264,7 @@ export function createGatewayRuntime(
         "INSERT INTO jobs(id,thread,actor,sequence,command,payload,state) VALUES(?,?,?,?,?,?,?)",
       ).run(
         id,
-        route.thread,
+        (command && approvals.controlThread(route)) || route.thread,
         route.sender,
         route.sequence ?? null,
         command,
@@ -307,7 +335,7 @@ export function createGatewayRuntime(
         ? identity.imessageNumber?.number
         : identity.whatsappNumber;
     const originalNumber = ownNumber();
-    const confirmEdit = (proposal, hostSignal) => {
+    const confirmEdit = (proposal, hostSignal, remainingMs) => {
       const signals = [signal, turnEnded.signal];
       if (hostSignal) signals.push(hostSignal);
       const allowed = (source) =>
@@ -317,6 +345,7 @@ export function createGatewayRuntime(
       return approvals.request({
         route,
         proposal,
+        remainingMs,
         signal: AbortSignal.any(signals),
         async verify(source, expectedCommand) {
           if (!allowed(source)) return false;
@@ -342,14 +371,27 @@ export function createGatewayRuntime(
               : copy.text === source.text)
           );
         },
-        send: (prompt, code) =>
-          reply(
+        send: async (prompt, code) => {
+          const sent = await reply(
             { ...route, editApprovalPrompt: true },
             prompt,
             digest(job.id, "edit-approval", code),
             client,
             identity,
-          ),
+          );
+          if (
+            sent?.id &&
+            !signal.aborted &&
+            !turnEnded.signal.aborted &&
+            db
+              .prepare(
+                "SELECT state FROM notices WHERE channel=? AND message=?",
+              )
+              .get(route.channel, sent.id)?.state === "failed"
+          )
+            throw new Error("The approval request could not be delivered.");
+          return sent;
+        },
       });
     };
     try {
@@ -415,7 +457,7 @@ export function createGatewayRuntime(
     }
     let answer = job.answer;
     if (job.state === "queued") {
-      const session = getSession.get(route.thread);
+      const session = getSession.get(job.thread);
       if (
         (session?.sequence != null &&
           job.sequence != null &&
@@ -452,7 +494,7 @@ export function createGatewayRuntime(
         return;
       }
       if (
-        isEditControl(route.text.trim()) ||
+        reservedEditControl(route, route.text.trim()) ||
         (job.command && isEditControl(job.command))
       ) {
         // beforeTurn authenticated the incoming control from Inkbox, including
@@ -466,11 +508,20 @@ export function createGatewayRuntime(
         return;
       }
       if (job.command) {
+        // The SDK has now verified the control body and native subthread. An
+        // expired alias cannot target newer work in the original conversation.
+        if (
+          job.thread !== route.thread &&
+          approvals.controlThread(route) !== job.thread
+        ) {
+          mark.run("ignored", job.id);
+          return;
+        }
         transaction(() => {
           answer = applyControl(job, route);
           saveAnswer.run(answer, JSON.stringify(route), job.id);
         });
-        if (session && !getSession.get(route.thread))
+        if (session && !getSession.get(job.thread))
           rmSync(pathFor(session.revision), { force: true });
       } else {
         const notes = delivery.unread(job);
@@ -640,7 +691,7 @@ export function createGatewayRuntime(
     ORDER BY j.command IS NULL, j.rowid`);
 
   function schedule() {
-    if (closed) return;
+    if (closed || paused) return;
     clearTimeout(timer);
     timer = setTimeout(pump, 0);
   }
@@ -700,6 +751,10 @@ export function createGatewayRuntime(
   }
   schedule();
   return {
+    start() {
+      paused = false;
+      schedule();
+    },
     acceptVerified,
     eventState(eventId) {
       return (

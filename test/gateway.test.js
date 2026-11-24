@@ -539,14 +539,16 @@ test(
         return "Reply.";
       },
       async reply(route) {
+        if (route.message === "refused")
+          throw Object.assign(new Error("send refused"), { statusCode: 400 });
         return { id: "out-" + route.message };
       },
     };
     let runtime = createGatewayRuntime({ home }, deps);
-    async function send(id, text, thread) {
+    async function send(id, text, thread, terminal = "done") {
       const event = sms(id, text, thread);
       assert.equal(runtime.acceptVerified(event), "accepted");
-      while (runtime.eventState(event.id) !== "done")
+      while (runtime.eventState(event.id) !== terminal)
         await new Promise((resolve) => setTimeout(resolve, 5));
     }
     function notice(id, status, message) {
@@ -585,6 +587,45 @@ test(
       assert.equal(notes[3], undefined);
       assert.match(notes[4], /1 reported failed, 0 unconfirmed/);
       assert.equal(notes[5], undefined);
+      await send("refused", "hello", "thread-a", "failed");
+      await send("after-refused");
+      assert.match(notes.at(-1), /1 reported failed, 0 unconfirmed/);
+    } finally {
+      await runtime.close();
+      await rm(home, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "standalone startup can journal ingress without starting a turn until the listener and subscriptions are ready",
+  { timeout: 5000 },
+  async () => {
+    const home = await mkdtemp(join(tmpdir(), "inkbox-pi-startup-"));
+    const seen = [];
+    const deps = {
+      identity,
+      client: {},
+      async turn(_, route, file) {
+        seen.push(route.message);
+        await writeFile(file, "ready");
+        return "okay";
+      },
+      async reply() {},
+    };
+    let runtime = createGatewayRuntime({ home }, deps, { paused: true });
+    try {
+      runtime.acceptVerified(sms("startup"));
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      assert.deepEqual(seen, []);
+      assert.equal(runtime.eventState("evt-startup"), "queued");
+      await runtime.close(); // Failed listener setup.
+      runtime = createGatewayRuntime({ home }, deps, { paused: true });
+      assert.equal(runtime.eventState("evt-startup"), "queued");
+      runtime.start();
+      while (runtime.eventState("evt-startup") !== "done")
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      assert.deepEqual(seen, ["startup"]);
     } finally {
       await runtime.close();
       await rm(home, { recursive: true, force: true });

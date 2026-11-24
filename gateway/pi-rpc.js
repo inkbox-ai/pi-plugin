@@ -85,7 +85,8 @@ export function createEditRpc(stdin, files, confirmEdit, signal) {
         typeof event.id === "string" &&
         !signal.aborted
       ) {
-        void handleDialog(event);
+        if (["confirm", "input", "select", "editor"].includes(event.method))
+          void handleDialog(event);
       } else if (
         event.type === "response" &&
         event.id === promptId &&

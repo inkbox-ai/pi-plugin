@@ -268,205 +268,233 @@ test(
   },
 );
 
-test(
-  "real Pi edits a granted file only after approval from the original iMessage conversation",
-  { timeout: 45_000 },
-  async (t) => {
-    const home = mkdtempSync(join(tmpdir(), "pi-project-approval-"));
-    const workspace = join(home, "workspace");
-    const agentDir = join(home, "agent");
-    mkdirSync(workspace);
-    mkdirSync(agentDir);
-    const file = "project.txt";
-    const filePath = join(workspace, file);
-    writeFileSync(filePath, "Status: draft\n");
-    const modelRequests = [];
-    const finalAnswer = "I changed the status to ready.";
-    const server = createServer(async (req, res) => {
-      if (req.url !== "/v1/chat/completions") {
-        res.writeHead(404).end();
-        return;
-      }
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      modelRequests.push(JSON.parse(body));
-      if (modelRequests.length === 1) {
-        streamCompletion(res, [
-          [
-            {
-              role: "assistant",
-              tool_calls: [
-                {
-                  index: 0,
-                  id: "call_replace",
-                  type: "function",
-                  function: {
-                    name: "inkbox_project_replace",
-                    arguments: JSON.stringify({
-                      file,
-                      oldText: "draft",
-                      newText: "ready",
-                    }),
+for (const channel of ["imessage", "whatsapp"])
+  test(
+    `real Pi edits a granted file only after approval from the original ${channel} conversation`,
+    { timeout: 45_000 },
+    async (t) => {
+      const home = mkdtempSync(join(tmpdir(), "pi-project-approval-"));
+      const workspace = join(home, "workspace");
+      const agentDir = join(home, "agent");
+      mkdirSync(workspace);
+      mkdirSync(agentDir);
+      const file = "project.txt";
+      const filePath = join(workspace, file);
+      writeFileSync(filePath, "Status: draft\n");
+      const modelRequests = [];
+      const finalAnswer = "I changed the status to ready.";
+      const server = createServer(async (req, res) => {
+        if (req.url !== "/v1/chat/completions") {
+          res.writeHead(404).end();
+          return;
+        }
+        let body = "";
+        for await (const chunk of req) body += chunk;
+        modelRequests.push(JSON.parse(body));
+        if (modelRequests.length === 1) {
+          streamCompletion(res, [
+            [
+              {
+                role: "assistant",
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: "call_replace",
+                    type: "function",
+                    function: {
+                      name: "inkbox_project_replace",
+                      arguments: JSON.stringify({
+                        file,
+                        oldText: "draft",
+                        newText: "ready",
+                      }),
+                    },
                   },
-                },
-              ],
-            },
-            null,
-          ],
-          [{}, "tool_calls"],
-        ]);
-      } else {
-        modelResponse(res, finalAnswer);
-      }
-    });
-    const api = "http://127.0.0.1:" + (await listen(server));
-    configurePi(t, home, agentDir, api);
+                ],
+              },
+              null,
+            ],
+            [{}, "tool_calls"],
+          ]);
+        } else {
+          modelResponse(res, finalAnswer);
+        }
+      });
+      const api = "http://127.0.0.1:" + (await listen(server));
+      configurePi(t, home, agentDir, api);
 
-    const owner = "+12025550102",
-      other = "+12025550103";
-    const sources = new Map();
-    const peers = { "owners-chat": owner, "other-chat": other };
-    const replies = [];
-    const identity = {
-      id: "agent",
-      imessageEnabled: true,
-      imessageNumber: { number: "+12025550101" },
-      async getIMessage(id) {
-        return sources.get(id);
-      },
-      async getIMessageConversation(id) {
-        const peer = peers[id];
-        return {
+      const owner = "+12025550102",
+        other = "+12025550103";
+      const sources = new Map();
+      const peers = { "owners-chat": owner, "other-chat": other };
+      const replies = [];
+      const line = "+12025550101";
+      const metadata = {
+        agentIdentityId: "agent",
+        localNumber: line,
+        unresolvedParticipantCount: 0,
+      };
+      const topRoot = (id) => (channel === "imessage" ? id : null);
+      const identity = {
+        id: "agent",
+        imessageEnabled: true,
+        imessageNumber: { number: line },
+        whatsappNumber: line,
+        async [channel === "imessage" ? "getIMessage" : "getWhatsAppMessage"](
           id,
+        ) {
+          return sources.get(id);
+        },
+        async [channel === "imessage"
+          ? "getIMessageConversation"
+          : "getWhatsAppConversation"](id) {
+          const peer = peers[id];
+          return {
+            id,
+            ...metadata,
+            isGroup: false,
+            remoteNumber: peer,
+            participants: [peer],
+            assignmentId: null,
+          };
+        },
+        async [channel === "imessage" ? "sendIMessage" : "sendWhatsApp"](
+          message,
+        ) {
+          if (message.replyToMessageId) {
+            const parent = sources.get(message.replyToMessageId);
+            parent.threadRootMessageId ??= parent.id;
+          }
+          replies.push(message);
+          return { id: "reply-" + replies.length };
+        },
+      };
+      let runtime;
+      t.after(async () => {
+        await runtime?.close();
+        server.closeAllConnections();
+        await new Promise((resolve) => server.close(resolve));
+        rmSync(home, { recursive: true, force: true });
+      });
+      runtime = createGatewayRuntime(
+        {
+          home,
+          projectDirectory: workspace,
+          baseUrl: api,
+          projectFiles: [file],
+          trustedConversations: Object.entries(peers).map(
+            ([chat, peer]) => channel + ":" + chat + ":" + peer,
+          ),
+          piBin: resolve("node_modules/.bin/pi"),
+        },
+        { client: {}, identity },
+      );
+
+      function submit(id, chat, text, threadRoot) {
+        const peer = peers[chat];
+        sources.set(id, {
+          id,
+          conversationId: chat,
+          threadRootMessageId: threadRoot ?? topRoot(id),
+          ...metadata,
+          senderAccess: "direct",
+          direction: "inbound",
+          service: "imessage",
           isGroup: false,
+          isBlocked: false,
           remoteNumber: peer,
           participants: [peer],
           assignmentId: null,
-        };
-      },
-      async sendIMessage(message) {
-        replies.push(message);
-        return { id: "reply-" + replies.length };
-      },
-    };
-    let runtime;
-    t.after(async () => {
-      await runtime?.close();
-      server.closeAllConnections();
-      await new Promise((resolve) => server.close(resolve));
-      rmSync(home, { recursive: true, force: true });
-    });
-    runtime = createGatewayRuntime(
-      {
-        home,
-        projectDirectory: workspace,
-        baseUrl: api,
-        projectFiles: [file],
-        trustedConversations: Object.entries(peers).map(
-          ([chat, peer]) => "imessage:" + chat + ":" + peer,
-        ),
-        piBin: resolve("node_modules/.bin/pi"),
-      },
-      { client: {}, identity },
-    );
-
-    function submit(id, chat, text, threadRoot) {
-      const peer = peers[chat];
-      sources.set(id, {
-        id,
-        conversationId: chat,
-        threadRootMessageId: threadRoot,
-        direction: "inbound",
-        service: "imessage",
-        isGroup: false,
-        isBlocked: false,
-        remoteNumber: peer,
-        participants: [peer],
-        assignmentId: null,
-        content: text,
-      });
-      return runtime.acceptVerified({
-        id,
-        event_type: "imessage.received",
-        data: {
-          message: {
-            id,
-            conversation_id: chat,
-            thread_root_message_id: threadRoot,
-            remote_number: peer,
-            direction: "inbound",
-            sender_access: "direct",
-            content: text,
+          content: text,
+        });
+        return runtime.acceptVerified({
+          id,
+          event_type: channel + ".received",
+          data: {
+            message: {
+              id,
+              conversation_id: chat,
+              thread_root_message_id: threadRoot ?? topRoot(id),
+              agent_identity_id: identity.id,
+              remote_number: peer,
+              direction: "inbound",
+              sender_access: "direct",
+              content: text,
+            },
           },
-        },
-      });
-    }
-    async function until(predicate, message) {
-      const deadline = Date.now() + 15_000;
-      while (!predicate() && Date.now() < deadline) await delay(20);
-      assert.ok(predicate(), message);
-    }
+        });
+      }
+      async function until(predicate, message) {
+        const deadline = Date.now() + 15_000;
+        while (!predicate() && Date.now() < deadline) await delay(20);
+        assert.ok(predicate(), message);
+      }
 
-    const original = "Please change the status to ready.";
-    assert.equal(submit("edit", "owners-chat", original), "accepted");
-    await until(() => replies.length > 0, "Pi did not request approval");
-    assert.equal(replies[0].conversationId, "owners-chat");
-    assert.equal(replies[0].plainReplyFallback, false);
-    assert.equal(replies[0].replyToMessageId, "edit");
-    assert.match(replies[0].text, /project\.txt/);
-    assert.match(replies[0].text, /draft/);
-    assert.match(replies[0].text, /ready/);
-    const approval = replies[0].text.match(/\/approve ([a-f0-9]{24})\b/i);
-    assert.ok(approval, "Expected an explicit approval command");
-    assert.match(
-      JSON.stringify(modelRequests[0].messages),
-      /Please change the status to ready/,
-    );
-    const tools = modelRequests[0].tools.map((tool) => tool.function);
-    assert.deepEqual(tools.map(({ name }) => name).sort(), [
-      "inkbox_project_read",
-      "inkbox_project_replace",
-    ]);
-    for (const tool of tools)
-      assert.deepEqual(tool.parameters.properties.file.enum, [file]);
-    assert.equal(readFileSync(filePath, "utf8"), "Status: draft\n");
+      const original = "Please change the status to ready.";
+      assert.equal(submit("edit", "owners-chat", original), "accepted");
+      await until(() => replies.length > 0, "Pi did not request approval");
+      assert.equal(replies[0].conversationId, "owners-chat");
+      assert.equal(replies[0].plainReplyFallback, false);
+      assert.equal(replies[0].replyToMessageId, "edit");
+      assert.match(replies[0].text, /project\.txt/);
+      assert.match(replies[0].text, /draft/);
+      assert.match(replies[0].text, /ready/);
+      const approval = replies[0].text.match(/\/approve ([a-f0-9]{24})\b/i);
+      assert.ok(approval, "Expected an explicit approval command");
+      assert.match(
+        JSON.stringify(modelRequests[0].messages),
+        /Please change the status to ready/,
+      );
+      const tools = modelRequests[0].tools.map((tool) => tool.function);
+      assert.deepEqual(tools.map(({ name }) => name).sort(), [
+        "inkbox_project_read",
+        "inkbox_project_replace",
+      ]);
+      for (const tool of tools)
+        assert.deepEqual(tool.parameters.properties.file.enum, [file]);
+      assert.equal(readFileSync(filePath, "utf8"), "Status: draft\n");
 
-    // Even a different owner-granted chat with the exact command cannot release the edit.
-    assert.equal(submit("foreign", "other-chat", approval[0]), "ignored");
-    assert.equal(runtime.eventState("foreign"), "unknown");
-    const staleCode =
-      (approval[1][0] === "0" ? "1" : "0") + approval[1].slice(1);
-    assert.equal(
-      submit("stale", "owners-chat", "/approve " + staleCode),
-      "ignored",
-    );
-    assert.equal(runtime.eventState("stale"), "unknown");
-    assert.equal(readFileSync(filePath, "utf8"), "Status: draft\n");
-    assert.equal(modelRequests.length, 1);
-    assert.equal(
-      submit("approved", "owners-chat", approval[0], "edit"),
-      "accepted",
-    );
-    await until(
-      () => runtime.eventState("edit") === "done",
-      "The approved Pi turn never completed",
-    );
-    assert.equal(runtime.eventState("approved"), "done");
-    assert.equal(readFileSync(filePath, "utf8"), "Status: ready\n");
-    assert.equal(modelRequests.length, 2);
-    const toolResult = modelRequests[1].messages.find(
-      (message) => message.role === "tool",
-    );
-    assert.ok(toolResult, "Pi must have executed the real tool");
-    assert.equal(toolResult.tool_call_id, "call_replace");
-    assert.match(JSON.stringify(toolResult.content), /File updated\./);
-    assert.notEqual(replies[0].idempotencyKey, replies[1].idempotencyKey);
-    assert.deepEqual(
-      replies.map(({ conversationId, text }) => [conversationId, text]),
-      [
-        ["owners-chat", replies[0].text],
-        ["owners-chat", finalAnswer],
-      ],
-    );
-  },
-);
+      // Even a different owner-granted chat with the exact command cannot release the edit.
+      assert.equal(submit("foreign", "other-chat", approval[0]), "ignored");
+      assert.equal(runtime.eventState("foreign"), "unknown");
+      const staleCode =
+        (approval[1][0] === "0" ? "1" : "0") + approval[1].slice(1);
+      assert.equal(
+        submit("stale", "owners-chat", "/approve " + staleCode),
+        "ignored",
+      );
+      assert.equal(runtime.eventState("stale"), "unknown");
+      assert.equal(readFileSync(filePath, "utf8"), "Status: draft\n");
+      assert.equal(modelRequests.length, 1);
+      assert.equal(
+        submit(
+          "approved",
+          "owners-chat",
+          approval[0],
+          channel === "imessage" ? undefined : "edit",
+        ),
+        "accepted",
+      );
+      await until(
+        () => runtime.eventState("edit") === "done",
+        "The approved Pi turn never completed",
+      );
+      assert.equal(runtime.eventState("approved"), "done");
+      assert.equal(readFileSync(filePath, "utf8"), "Status: ready\n");
+      assert.equal(modelRequests.length, 2);
+      const toolResult = modelRequests[1].messages.find(
+        (message) => message.role === "tool",
+      );
+      assert.ok(toolResult, "Pi must have executed the real tool");
+      assert.equal(toolResult.tool_call_id, "call_replace");
+      assert.match(JSON.stringify(toolResult.content), /File updated\./);
+      assert.notEqual(replies[0].idempotencyKey, replies[1].idempotencyKey);
+      assert.deepEqual(
+        replies.map(({ conversationId, text }) => [conversationId, text]),
+        [
+          ["owners-chat", replies[0].text],
+          ["owners-chat", finalAnswer],
+        ],
+      );
+    },
+  );

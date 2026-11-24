@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { verifyProjectConversation } from "../gateway/project-grants.js";
 import { createGatewayRuntime } from "../gateway/runtime.js";
-import { beforeTurn, sendReply } from "../gateway/channels.js";
+import { beforeTurn, parseRoute, sendReply } from "../gateway/channels.js";
 
 const peer = "+12025550123",
   own = "+12025550100",
@@ -182,6 +182,8 @@ test("trusted phone approval prompts and project subthreads use a strict native 
       {},
       identity,
     );
+    // The provider now reports the previously top-level parent as its own root.
+    source.threadRootMessageId = source.id;
     await sendReply(trusted, "ordinary answer", "answer", {}, identity);
     source.threadRootMessageId = "root";
     await sendReply(
@@ -446,3 +448,35 @@ test(
     assert.equal(runtime.eventState("work"), "uncertain");
   },
 );
+
+test("top-level phone messages with self roots share a conversation; native replies retain their parent root", () => {
+  const { identity } = resources();
+  for (const channel of ["imessage", "whatsapp"]) {
+    function received(id, root, parent) {
+      return parseRoute(
+        {
+          id,
+          event_type: channel + ".received",
+          data: {
+            message: {
+              id,
+              conversation_id: route.conversation,
+              direction: "inbound",
+              agent_identity_id: identity.id,
+              remote_number: peer,
+              sender_access: "direct",
+              content: "hi",
+              reply_to_message_id: parent,
+              thread_root_message_id: root,
+            },
+          },
+        },
+        identity,
+      );
+    }
+    const top = received("one", "one", null);
+    assert.equal(top.thread, received("two", "two", null).thread);
+    assert.equal(top.thread, received("three", null, null).thread);
+    assert.notEqual(top.thread, received("child", "one", "one").thread);
+  }
+});

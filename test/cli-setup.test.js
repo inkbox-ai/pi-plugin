@@ -223,3 +223,11 @@ test("readiness rejects a known rotated key without mutating the saved profile",
   );
   assert.deepEqual(readProfile(home), saved);
 });
+
+test("non-interactive key replacement fails rather than reporting setup success", async () => {
+  const { main } = await import("../cli/index.js");
+  await assert.rejects(
+    main(["setup", "--replace-key", "--print"]),
+    /interactive terminal/,
+  );
+});

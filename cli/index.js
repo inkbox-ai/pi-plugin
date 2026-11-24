@@ -21,7 +21,7 @@ const HELP = `inkbox-pi — Inkbox for the Pi coding agent
   bootstrap --identity HANDLE [--base-url URL] [--project-dir DIR]
             [--api-key-stdin] [--rotate-signing-key] [--start-gateway]
   whoami              Show the connected identity and channel addresses
-  doctor              Check the Pi binary, identity, signing key and gateway
+  doctor              Check Pi, identity and signing key; report gateway status
   event EVENT_ID      Inspect the local state and any captured result for a webhook event
   run                 Run the inbound gateway in the foreground
   start|stop|restart   Manage the background gateway
@@ -95,9 +95,14 @@ async function doctor(config) {
   printIdentity(identity);
   const { inspectJournal } = await import("../gateway/journal.js");
   try {
-    console.log("Local gateway journal: " + JSON.stringify(inspectJournal(config, identity)));
+    console.log(
+      "Local gateway journal: " +
+        JSON.stringify(inspectJournal(config, identity)),
+    );
   } catch {
-    console.log("Local gateway journal: unavailable; check access to the state directory and retry.");
+    console.log(
+      "Local gateway journal: unavailable; check access to the state directory and retry.",
+    );
   }
   const ready = await signingKeyReady(config, identity);
   console.log(
@@ -203,6 +208,13 @@ export async function main(argv) {
           }
         : { print: { type: "boolean" }, "replace-key": { type: "boolean" } };
     const { values } = parseArgs({ args, options: schema });
+    if (
+      values["replace-key"] &&
+      (values.print || !process.stdin.isTTY || !process.stdout.isTTY)
+    )
+      throw problem(
+        "Replacing the key needs an interactive terminal without --print.",
+      );
     if (
       command === "setup" &&
       (values.print || !process.stdin.isTTY || !process.stdout.isTTY)
