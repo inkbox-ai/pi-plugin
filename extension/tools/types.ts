@@ -14,6 +14,7 @@ export interface ToolDeps {
   vault: VaultRuntime;
   config: {
     home: string;
+    slackEnabled: boolean;
     outbound: {
       approval: "auto" | "ask" | "allowlist";
       allowedRecipients: string[];

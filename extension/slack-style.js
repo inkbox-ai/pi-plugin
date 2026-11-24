@@ -1,4 +1,5 @@
-export function slackMrkdwn(text: string): string {
+/** @param {string} text */
+export function slackMrkdwn(text) {
   return text
     .split(/(```[\s\S]*?```|`[^`\n]*`)/g)
     .map((part, index) =>

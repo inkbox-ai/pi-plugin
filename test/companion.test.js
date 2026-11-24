@@ -437,3 +437,85 @@ test("a changed reply-all audience is not sent a previously generated reply", as
     /destination changed/,
   );
 });
+
+test("Slack group mention mode requires a native mention, not quoted plain text", () => {
+  const event = {
+    id: "evt",
+    event_type: "slack.group_dm_received",
+    data: {
+      identity_id: id.id,
+      connection_id: "conn",
+      workspace_id: "team",
+      actor_id: "person",
+      conversation_id: "channel",
+      message_ts: "10.000001",
+      event: { text: "Literal @agent" },
+    },
+  };
+  const options = { slackEnabled: true, groupReplyMode: "mention" };
+  assert.equal(parseRoute(event, id, [], options), null);
+  assert.ok(
+    parseRoute(
+      { ...event, event_type: "slack.mention_received" },
+      id,
+      [],
+      options,
+    ),
+  );
+});
+
+test("blocked messages and changes to a group audience prevent WhatsApp replies", async () => {
+  const sender = "+12025550101";
+  const peer = "+12025550102";
+  const source = {
+    id: "msg",
+    direction: "inbound",
+    agentIdentityId: id.id,
+    conversationId: "group",
+    isGroup: true,
+    senderNumber: sender,
+    isBlocked: false,
+  };
+  const dest = {
+    id: "group",
+    agentIdentityId: id.id,
+    isGroup: true,
+    participants: [sender, peer],
+    unresolvedParticipantCount: 0,
+  };
+  const owner = {
+    ...id,
+    whatsappEnabled: true,
+    getWhatsAppMessage: async () => source,
+    getWhatsAppConversation: async () => dest,
+    sendWhatsApp: async () => assert.fail("should not send"),
+  };
+  const message = {
+    id: "msg",
+    direction: "inbound",
+    agent_identity_id: id.id,
+    conversation_id: "group",
+    is_group: true,
+    sender_number: sender,
+    content: "Hi",
+  };
+  const incoming = (data) => ({
+    id: "event",
+    event_type: "whatsapp.received",
+    data: { message: data },
+  });
+  assert.equal(
+    parseRoute(incoming({ ...message, is_blocked: true }), owner),
+    null,
+  );
+  const route = parseRoute(incoming(message), owner);
+  assert.ok(await beforeTurn(route, {}, owner));
+  dest.participants.push("+12025550103");
+  await assert.rejects(
+    sendReply(route, "answer", "key", {}, owner),
+    /destination changed/,
+  );
+  dest.participants.pop();
+  source.isBlocked = true;
+  assert.equal(await beforeTurn(route, {}, owner), false);
+});

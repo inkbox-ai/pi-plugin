@@ -255,16 +255,24 @@ export function whatsappTools(deps: ToolDeps): RegisteredTool[] {
             idempotencyKey: z.string().min(1),
           },
       async (args, ctx) => {
-        const target = remove ? args.reactionId : args.messageId;
-        await approveOutbound(ctx, deps.config, {
-          tool: remove
-            ? "inkbox_remove_whatsapp_reaction"
-            : "inkbox_send_whatsapp_reaction",
-          summary: "Update WhatsApp reaction",
-          recipients: [],
-          patterns: [target],
-        });
         const identity = await deps.runtime.getIdentity();
+        const reaction = remove ? await identity.getWhatsAppReaction(args.reactionId) : undefined;
+        if (remove && (reaction?.id !== args.reactionId || reaction.agentIdentityId !== identity.id || !reaction.targetMessageId))
+          throw new Error("WhatsApp reaction does not belong to this identity.");
+        const messageId = reaction?.targetMessageId ?? args.messageId;
+        const message = await identity.getWhatsAppMessage(messageId);
+        if (message.id !== messageId || message.agentIdentityId !== identity.id || !message.conversationId ||
+            (reaction && reaction.conversationId !== message.conversationId))
+          throw new Error("WhatsApp reaction target does not belong to this conversation.");
+        const recipients = await participants(identity, message.conversationId);
+        await approveOutbound(ctx, deps.config, {
+          tool: remove ? "inkbox_remove_whatsapp_reaction" : "inkbox_send_whatsapp_reaction",
+          summary: "Update WhatsApp reaction",
+          recipients,
+        });
+        if (JSON.stringify(await participants(identity, message.conversationId)) !== JSON.stringify(recipients))
+          throw new Error("WhatsApp participants changed; review the new destination before reacting.");
+        ctx.abort?.throwIfAborted();
         return remove
           ? identity.removeWhatsAppReaction(
               args.reactionId,

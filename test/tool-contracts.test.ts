@@ -10,7 +10,7 @@ import { slackTools } from "../extension/tools/slack.ts";
 import { whatsappTools } from "../extension/tools/whatsapp.ts";
 import { requestKey } from "../extension/message-key.ts";
 
-const ask = { outbound: { approval: "ask", allowedRecipients: [] } };
+const ask = { slackEnabled: true, outbound: { approval: "ask", allowedRecipients: [] } };
 const ctx = { callId: "tool:1", sessionID: "session:1", confirm: async () => true };
 
 test("A2A can request input, fail or complete, but a model cannot retarget a task", () => {
@@ -104,4 +104,28 @@ test("A2A task follow-ups keep the original task and report the recovery ID on u
   }, ctx), new RegExp(requestKey(ctx)));
   assert.equal(recorded.taskId, "current");
   assert.equal(recorded.messageId, requestKey(ctx));
+});
+
+test("WhatsApp reactions check the owned target and its current audience", async () => {
+  const allowed = "+12025550101", other = "+12025550102";
+  let current = [allowed], owner = "self", writes = 0;
+  const identity = { id:"self",
+    getWhatsAppReaction: async id => ({id,agentIdentityId:owner,conversationId:"chat",targetMessageId:"message"}),
+    getWhatsAppMessage: async id => ({id,agentIdentityId:owner,conversationId:"chat"}),
+    getWhatsAppConversation: async id => ({id,agentIdentityId:"self",unresolvedParticipantCount:0,isGroup:true,
+      remoteNumber:null,participants:[...current]}),
+    sendWhatsAppReaction:async () => ++writes, removeWhatsAppReaction:async () => ++writes,
+  };
+  const tools = whatsappTools({runtime:{getIdentity:async () => identity},config:{outbound:{approval:"ask",allowedRecipients:[allowed]}}});
+  for (const remove of [false,true]) {
+    const tool = tools.find(t => t.name === (remove ? "inkbox_remove_whatsapp_reaction" : "inkbox_send_whatsapp_reaction"));
+    const args = remove ? {reactionId:"reaction",idempotencyKey:"remove"} : {messageId:"message",reaction:"love",idempotencyKey:"send"};
+    current = [allowed]; owner = "self";
+    await tool.definition.execute(args,ctx);
+    await assert.rejects(tool.definition.execute(args,{...ctx, confirm:async () => {current = [allowed,other]; return true;}}),/changed/);
+    await assert.rejects(tool.definition.execute(args,ctx),/allowlist/);
+    owner = "other";
+    await assert.rejects(tool.definition.execute(args,ctx),/belong/);
+  }
+  assert.equal(writes,2);
 });

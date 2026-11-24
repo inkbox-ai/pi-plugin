@@ -315,6 +315,16 @@ export function parseRoute(event, identity, allowedSenders = [], options = {}) {
     route.sequence = event.companion.sequence;
     route.group = true;
   }
+  if (
+    channel === "whatsapp" &&
+    record.is_blocked === true &&
+    !(
+      route.sponsored &&
+      record.is_group === true &&
+      route.companion?.activation
+    )
+  )
+    return null;
   route.noControls =
     media.length > 0 ||
     route.group ||
@@ -326,8 +336,9 @@ export function parseRoute(event, identity, allowedSenders = [], options = {}) {
     route.channel !== "sms" &&
     options.groupReplyMode === "mention" &&
     !addressed &&
-    !record?.agent_mentioned &&
-    !mentionsAgent(caption ?? "", identity.agentHandle)
+    (channel === "slack" ||
+      (!record?.agent_mentioned &&
+        !mentionsAgent(caption ?? "", identity.agentHandle)))
   )
     return null;
   route.thread = route.companion
@@ -570,19 +581,29 @@ async function messagingSource(route, identity) {
       source.conversationId !== route.conversation ||
       source.direction !== "inbound" ||
       (whatsapp && source.agentIdentityId !== identity.id) ||
+      (source.isBlocked === true &&
+        !(
+          route.sponsored &&
+          source.isGroup === true &&
+          route.companion?.activation
+        )) ||
       (source.senderNumber || source.remoteNumber) !== route.sender ||
       (source.threadRootMessageId || source.threadId || "") !==
         (route.subthread || "")
     )
       return false;
     refreshMedia(route, source.media);
-    if (route.group || source.isGroup || route.allowedRecipients?.length) {
+    {
+      // Both the model turn and its eventual delivery are bound to the same
+      // current audience. An old webhook is not proof of present membership.
       const destination = whatsapp
         ? await identity.getWhatsAppConversation(route.conversation)
         : await identity.getIMessageConversation(route.conversation);
       if (
         destination.id !== route.conversation ||
-        (source.isGroup === true && destination.isGroup !== true) ||
+        typeof destination.isGroup !== "boolean" ||
+        Boolean(source.isGroup || route.group) !== destination.isGroup ||
+        (!destination.isGroup && destination.remoteNumber !== route.sender) ||
         (destination.isGroup &&
           (!Array.isArray(destination.participants) ||
             !destination.participants.includes(route.sender) ||
@@ -591,14 +612,32 @@ async function messagingSource(route, identity) {
             ))) ||
         (whatsapp &&
           (destination.agentIdentityId !== identity.id ||
-            destination.unresolvedParticipantCount > 0)) ||
-        !recipientsAllowed(
-          route,
-          destination.isGroup
-            ? destination.participants
-            : [destination.remoteNumber],
-          [identity.whatsappNumber, identity.imessageNumber?.number],
-        )
+            destination.unresolvedParticipantCount > 0))
+      )
+        return false;
+      const members = destination.isGroup
+        ? [...new Set(destination.participants)].sort()
+        : [destination.remoteNumber];
+      if (
+        route.members &&
+        JSON.stringify(route.members) !== JSON.stringify(members)
+      )
+        return false;
+      route.members = members;
+      route.group = destination.isGroup;
+      route.noControls ||= route.group;
+      if (
+        route.group &&
+        route.groupReplyMode === "mention" &&
+        !(whatsapp && source.agentMentioned) &&
+        !mentionsAgent(route.caption ?? route.text, identity.agentHandle)
+      )
+        return false;
+      if (
+        !recipientsAllowed(route, members, [
+          identity.whatsappNumber,
+          identity.imessageNumber?.number,
+        ])
       )
         return false;
     }

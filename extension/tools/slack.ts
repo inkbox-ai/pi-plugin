@@ -6,7 +6,7 @@ import { runTool } from "../errors.ts";
 import { formatJson } from "../format.ts";
 import { approveOutbound } from "../permissions.ts";
 import { ownSlackConnection, slackText } from "../slack.ts";
-import { slackMrkdwn } from "../slack-style.ts";
+import { slackMrkdwn } from "../slack-style.js";
 import type { RegisteredTool, ToolDeps } from "./types.ts";
 
 const text = z
@@ -91,6 +91,7 @@ const specs = [
   },
 ] as const;
 export function slackTools({ runtime, config }: ToolDeps): RegisteredTool[] {
+  if (!config.slackEnabled) return [];
   return specs.map((spec) => ({
     name: `inkbox_slack_${spec.name}`,
     group: "slack",

@@ -51,7 +51,7 @@ Configure model access in Pi itself before starting a background service. The ga
 
 By default the gateway uses an Inkbox tunnel. To supply your own HTTPS endpoint, set `INKBOX_PI_PUBLIC_URL` and a fixed `INKBOX_PI_PORT` and forward `/webhook` to that port. Set `INKBOX_PI_ALLOWED_SENDERS` to a comma-separated list to narrow inbound senders. Keep your signing key private; rotating it replaces the key for the identity, not just for this installation.
 
-Slack gateway replies are opt-in for a connected identity. Set `INKBOX_SLACK_ENABLED=true` (or `slackEnabled: true` in the profile), then restart. With Slack off, even old subscriptions cannot wake Pi.
+Slack tools and gateway replies are opt-in for a connected identity. Set `INKBOX_SLACK_ENABLED=true` (or `slackEnabled: true` in the profile), then reload Pi and restart the gateway. With Slack off, even old subscriptions cannot wake Pi.
 
 In a direct conversation, send `/status` for work status, `/stop` or `/cancel` to stop work, or `/new` or `/clear` to start a fresh session. These are messages to the gateway, not commands to type at a shell. Use `INKBOX_GROUP_REPLY_MODE=mention` to limit ordinary group wake-ups to messages addressing the agent.
 

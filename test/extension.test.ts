@@ -27,9 +27,10 @@ test("Pi can register tools without credentials and shows setup commands", async
       "inkbox_send_imessage",
       "inkbox_a2a_check",
       "inkbox_list_whatsapp_messages",
-      "inkbox_slack_search",
+
     ])
       assert(tools.has(name), name);
+    assert(!tools.has("inkbox_slack_search"));
     assert(!tools.has("inkbox_credentials_get_secret"));
     assert(!tools.has("inkbox_place_call"));
     assert(!tools.has("inkbox_list_call_transcripts"));

@@ -216,3 +216,10 @@ test(
     assert.doesNotMatch(JSON.stringify(logs), /private-body|secret-fixture/);
   },
 );
+
+test("automatic Slack replies format links and bold without touching inline code", () => {
+  assert.equal(
+    boundedReply("slack", "**Hello**, [docs](https://example.com) and `**x**`"),
+    "*Hello*, <https://example.com|docs> and `**x**`",
+  );
+});
