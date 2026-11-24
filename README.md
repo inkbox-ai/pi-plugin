@@ -16,7 +16,7 @@ You need Node.js 22.19 or newer, [Pi](https://pi.dev/) on your PATH, and a model
 
     pi install npm:@inkbox/pi-plugin
 
-Start Pi or run `/reload`. Use `/inkbox` to see the setup and gateway commands **for that installation**; Pi's package directory does not need to be on your shell PATH. Use `/inkbox-status` to see the active profile and available tools. If you installed a shell launcher, the same commands are available as `inkbox-pi`.
+Start Pi or run `/reload`. Use `/inkbox` to see the setup and gateway commands **for that installation**; Pi's package directory does not need to be on your shell PATH. Use `/inkbox-status` to see the active profile and available tools. If you want a shell launcher, run `./install.sh --git` from a checkout before npm publication, or `./install.sh` after publication. This installs the Pi package and links `inkbox-pi` to the same copy. Otherwise use the installation-specific command shown by `/inkbox`.
 
 To replace a revoked key for the same identity, run `inkbox-pi setup --replace-key`; the masked prompt verifies the replacement before saving it.
 
@@ -35,11 +35,24 @@ Try “Show my Inkbox identity,” “List my unread emails,” or “Send a tex
 | Agent-to-agent tasks | Send a task, check its status and read the conversation |
 | Vault | Opt in to specific credential tools; plaintext tools require exact-name enablement |
 
-The local profile is stored under `~/.inkbox-pi` (override with `INKBOX_PI_HOME`). Use `INKBOX_API_KEY`, `INKBOX_IDENTITY`, and optionally `INKBOX_BASE_URL` to configure a process without changing the saved identity. Inside the profile's `config.json`, the optional `tools.enable` and `tools.disable` arrays accept group names or exact tool names. Keep the rest of the generated file intact. Reload Pi after changing the profile. Remote discovery and execution are limited to supported operations whose corresponding local tools are enabled.
+The local profile is stored under `~/.inkbox-pi` (override with `INKBOX_PI_HOME`). Use `INKBOX_API_KEY`, `INKBOX_IDENTITY`, and optionally `INKBOX_BASE_URL` to configure a process without changing the saved identity. Inside the profile's `config.json`, the optional `tools.enable` and `tools.disable` arrays accept group names or exact tool names. Keep the rest of the generated file intact. Reload Pi after changing the profile. Remote discovery and execution are limited to supported operations whose corresponding local tools are enabled. The remote tools do not expose every new server operation automatically.
+
+To restrict terminal sends to specific recipients, set `outbound` in that profile:
+
+```json
+{
+  "outbound": {
+    "approval": "allowlist",
+    "allowedRecipients": ["owner@example.com", "+12025550123"]
+  }
+}
+```
+
+`ask` (default) prompts in Pi; `allowlist` permits only listed destinations without a prompt and requires at least one; `auto` permits without a prompt. A nonempty recipient list restricts destinations even in `ask` or `auto` mode. The gateway also enforces the recipient list on replies; it does not forward a terminal approval dialog to the sender.
 
 ## Running the gateway
 
-Configure model access in Pi itself before starting a background service. The gateway listens for signed Inkbox events and starts Pi turns independently of the interactive terminal. Startup and `inkbox-pi doctor` check for a selected model and configured credentials without sending a model prompt. Replies that exceed the messaging channel’s limit are explicitly shortened; the complete answer remains in local Pi history. It saves conversation history locally and routes the reply to the originating conversation. Incoming messages are not permission to use the interactive session's tools or credentials.
+Configure model access in Pi itself before starting a background service. The gateway listens for signed Inkbox events and starts Pi turns independently of the interactive terminal. Startup and `inkbox-pi doctor` check for a selected model and configured credentials without sending a model prompt. Replies that exceed the messaging channel’s limit are explicitly shortened; the complete answer remains in local Pi history. It saves conversation history locally and routes the reply to the originating conversation. Incoming messages are not permission to use the interactive session's tools or credentials. For example, an ordinary text can get an answer, but it cannot ask Pi to run the project tests or email a file. It cannot approve a terminal tool by replying from the phone. History is per conversation/thread rather than shared across channels for a contact. Unaddressed group messages suppressed by mention mode are not saved as running conversation context. Failed or unconfirmed deliveries are recorded locally, not automatically retried by the model.
 
 | Command | Purpose |
 |---|---|
