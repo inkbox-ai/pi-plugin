@@ -1,3 +1,4 @@
+import { journalDirectory } from "./journal.js";
 import { DatabaseSync } from "node:sqlite";
 import {
   mkdirSync,
@@ -53,7 +54,7 @@ export function createGatewayRuntime(
 ) {
   if (!identity?.id || !config.home)
     throw problem("Gateway identity and state directory required.");
-  const dir = join(config.home, "gateway", digest(config.baseUrl, identity.id));
+  const dir = journalDirectory(config, identity);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const owner = new DatabaseSync(join(dir, "owner.sqlite"));
   try {
@@ -264,16 +265,24 @@ export function createGatewayRuntime(
       return prior.length
         ? "Pi has work in progress in this conversation."
         : "Pi is idle in this conversation.";
-    if (prior.some((row) => row.state !== "queued"))
+    const stoppingProject = prior.some((row) => row.state === "project");
+    if (prior.some((row) => row.state !== "queued" && row.state !== "project"))
       return "A reply is already being delivered and cannot be stopped.";
     for (const row of prior) {
-      mark.run("canceled", row.id);
+      // A project tool may already have written a file; never replay or
+      // report its effects as rolled back after an abort.
+      mark.run(row.state === "project" ? "uncertain" : "canceled", row.id);
       active.get(row.id)?.controller.abort();
     }
     if (job.command === "/clear" || job.command === "/new") {
       db.prepare("DELETE FROM sessions WHERE thread=?").run(job.thread);
-      return "Conversation cleared. Your next message starts a new session.";
+      return (
+        "Conversation cleared. Your next message starts a new session." +
+        (stoppingProject ? " Earlier file edits may remain." : "")
+      );
     }
+    if (stoppingProject)
+      return "Stopping the project turn. Earlier file edits may remain.";
     return prior.length ? "Stopped." : "Nothing is running.";
   }
 

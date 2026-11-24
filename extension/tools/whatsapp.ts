@@ -257,7 +257,7 @@ export function whatsappTools(deps: ToolDeps): RegisteredTool[] {
       async (args, ctx) => {
         const identity = await deps.runtime.getIdentity();
         const reaction = remove ? await identity.getWhatsAppReaction(args.reactionId) : undefined;
-        if (remove && (reaction?.id !== args.reactionId || reaction.agentIdentityId !== identity.id || !reaction.targetMessageId))
+        if (remove && (!reaction || reaction.id !== args.reactionId || reaction.agentIdentityId !== identity.id || !reaction.targetMessageId))
           throw new Error("WhatsApp reaction does not belong to this identity.");
         const messageId = reaction?.targetMessageId ?? args.messageId;
         const message = await identity.getWhatsAppMessage(messageId);

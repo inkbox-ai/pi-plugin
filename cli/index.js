@@ -22,6 +22,7 @@ const HELP = `inkbox-pi — Inkbox for the Pi coding agent
             [--api-key-stdin] [--rotate-signing-key] [--start-gateway]
   whoami              Show the connected identity and channel addresses
   doctor              Check the Pi binary, identity, signing key and gateway
+  event EVENT_ID      Inspect the local state and any captured result for a webhook event
   run                 Run the inbound gateway in the foreground
   start|stop|restart   Manage the background gateway
   status              Show background gateway readiness and autostart state
@@ -92,6 +93,11 @@ async function doctor(config) {
     config.identity,
   );
   printIdentity(identity);
+  const { inspectJournal } = await import("../gateway/journal.js");
+  console.log(
+    "Local gateway journal: " +
+      JSON.stringify(inspectJournal(config, identity)),
+  );
   const ready = await signingKeyReady(config, identity);
   console.log(
     "Webhook signing key: " +
@@ -286,6 +292,18 @@ export async function main(argv) {
       );
     await service(args[0], config);
     return 0;
+  }
+  if (command === "event") {
+    if (args.length !== 1 || !args[0] || args[0].length > 256)
+      throw problem("Usage: inkbox-pi event EVENT_ID");
+    const identity = await verifiedIdentity(
+      createClient(config.apiKey, config.baseUrl),
+      config.identity,
+    );
+    const { inspectJournal } = await import("../gateway/journal.js");
+    const snapshot = inspectJournal(config, identity, args[0]);
+    console.log(JSON.stringify(snapshot));
+    return snapshot.state === "unknown" ? 3 : 0;
   }
   if (args.length) throw problem("Unexpected arguments. Run inkbox-pi help.");
   switch (command) {

@@ -97,7 +97,7 @@ runtime.acceptVerified(event);
 
 Call `runtime.acceptVerified(event)` to admit an event, then inspect `runtime.eventState(event.id)` to distinguish queued work from a delivered reply or a failure. Admission alone is not a delivery receipt. If a job fails, `runtime.lastFailure(event.id)` returns its most recent sanitized failure category and attempt number. Watch `runtime.failed` for a fatal runtime error and await `runtime.close()` on shutdown.
 
-A signed `inbound.received` event with an agent handler runs in a session dedicated to its source. If `INKBOX_PI_ALLOWED_SENDERS` is set, include the source ID to accept its events. Request bodies up to 64 KiB are passed as data; a completed analysis is available through `runtime.eventResult(event.id)`, not sent to the requester. Script handlers are not executed. Unsupported handlers and exhausted processing retries are reported against the originating delivery.
+A signed `inbound.received` event with an agent handler runs in a session dedicated to its source. If `INKBOX_PI_ALLOWED_SENDERS` is set, include the source ID to accept its events. Request bodies up to 64 KiB are passed as data; a completed analysis is available through `runtime.eventResult(event.id)`, not sent to the requester. With the standalone gateway, use `inkbox-pi event EVENT_ID` with the outer webhook event ID to inspect its local result or delivery state. `inkbox-pi doctor` also reports local job counts separately from background-service readiness. Script handlers are not executed. Unsupported handlers and exhausted processing retries are reported against the originating delivery.
 
 ## Releases
 

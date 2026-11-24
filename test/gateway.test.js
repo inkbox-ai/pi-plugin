@@ -415,6 +415,15 @@ test(
       )
         await new Promise((r) => setTimeout(r, 5));
       assert.equal(runtime.eventResult(first.id), "Captured.");
+      const { inspectJournal } = await import("../gateway/journal.js");
+      assert.equal(
+        inspectJournal({ home }, identity, first.id).result,
+        "Captured.",
+      );
+      assert.equal(inspectJournal({ home }, identity).counts.done, 1);
+      assert.deepEqual(inspectJournal({ home }, { id: "other" }, first.id), {
+        state: "unknown",
+      });
       assert.equal(turns.length, 1);
       assert.equal(JSON.parse(turns[0]).senderSignatureVerified, false);
       const second = event("delivery-b", {

@@ -333,3 +333,69 @@ test(
     assert.ok(entries.indexOf("end first") < entries.indexOf("start second"));
   },
 );
+
+test(
+  "a verified stop interrupts the owner's project turn without replaying possible edits",
+  { timeout: 5000 },
+  async (t) => {
+    const home = await mkdtemp(join(tmpdir(), "pi-stop-project-"));
+    const { identity, source } = resources();
+    identity.getIMessage = async (id) => ({
+      ...source,
+      id,
+      content: id === "stop" ? "/stop" : "change the file",
+    });
+    const started = Promise.withResolvers(),
+      stopped = Promise.withResolvers();
+    const runtime = createGatewayRuntime(
+      {
+        home,
+        projectDirectory: home,
+        projectFiles: ["example.txt"],
+        trustedConversations: ["imessage:conversation:" + peer],
+      },
+      {
+        identity,
+        client: {},
+        async turn(_config, _route, _file, signal) {
+          started.resolve();
+          await new Promise((_, reject) =>
+            signal.addEventListener(
+              "abort",
+              () => reject(new Error("aborted")),
+              { once: true },
+            ),
+          );
+        },
+        async reply(route, text) {
+          if (route.message === "stop") stopped.resolve(text);
+        },
+      },
+    );
+    t.after(async () => {
+      await runtime.close();
+      await rm(home, { recursive: true, force: true });
+    });
+    function submit(id, content) {
+      runtime.acceptVerified({
+        id,
+        event_type: "imessage.received",
+        data: {
+          message: {
+            id,
+            content,
+            conversation_id: "conversation",
+            direction: "inbound",
+            remote_number: peer,
+            sender_access: "direct",
+          },
+        },
+      });
+    }
+    submit("work", "change the file");
+    await started.promise;
+    submit("stop", "/stop");
+    assert.match(await stopped.promise, /Earlier file edits may remain/);
+    assert.equal(runtime.eventState("work"), "uncertain");
+  },
+);
