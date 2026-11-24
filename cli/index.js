@@ -94,10 +94,11 @@ async function doctor(config) {
   );
   printIdentity(identity);
   const { inspectJournal } = await import("../gateway/journal.js");
-  console.log(
-    "Local gateway journal: " +
-      JSON.stringify(inspectJournal(config, identity)),
-  );
+  try {
+    console.log("Local gateway journal: " + JSON.stringify(inspectJournal(config, identity)));
+  } catch {
+    console.log("Local gateway journal: unavailable; check access to the state directory and retry.");
+  }
   const ready = await signingKeyReady(config, identity);
   console.log(
     "Webhook signing key: " +

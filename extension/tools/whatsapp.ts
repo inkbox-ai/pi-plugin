@@ -267,8 +267,9 @@ export function whatsappTools(deps: ToolDeps): RegisteredTool[] {
         const recipients = await participants(identity, message.conversationId);
         await approveOutbound(ctx, deps.config, {
           tool: remove ? "inkbox_remove_whatsapp_reaction" : "inkbox_send_whatsapp_reaction",
-          summary: "Update WhatsApp reaction",
+          summary: remove ? "Remove WhatsApp reaction" : "Send WhatsApp reaction",
           recipients,
+          metadata: remove ? { messageId, reactionId: args.reactionId } : { messageId, reaction: args.reaction ?? args.customEmoji },
         });
         if (JSON.stringify(await participants(identity, message.conversationId)) !== JSON.stringify(recipients))
           throw new Error("WhatsApp participants changed; review the new destination before reacting.");

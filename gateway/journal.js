@@ -14,6 +14,7 @@ export function inspectJournal(config, identity, eventId) {
   if (!existsSync(file)) return missing;
   const db = new DatabaseSync(file, { readOnly: true });
   try {
+    db.exec("PRAGMA busy_timeout=3000");
     if (!eventId) {
       const counts = db
         .prepare("SELECT state, count(*) AS count FROM jobs GROUP BY state")

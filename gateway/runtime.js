@@ -69,7 +69,8 @@ export function createGatewayRuntime(
   try {
     db = new DatabaseSync(join(dir, "inbox.sqlite"));
     chmodSync(join(dir, "inbox.sqlite"), 0o600);
-    db.exec(`PRAGMA synchronous=FULL;
+    db.exec(`PRAGMA busy_timeout=3000;
+      PRAGMA synchronous=FULL;
       CREATE TABLE IF NOT EXISTS jobs (
         id TEXT UNIQUE NOT NULL, thread TEXT NOT NULL, payload TEXT, answer TEXT, actor TEXT NOT NULL,
         sequence INTEGER, command TEXT, state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, due INTEGER NOT NULL DEFAULT 0
