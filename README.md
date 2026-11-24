@@ -65,6 +65,8 @@ Import `createGatewayRuntime` from `@inkbox/pi-plugin/runtime` when your applica
 
 Call `runtime.acceptVerified(event)` to admit an event, then inspect `runtime.eventState(event.id)` to distinguish queued work from a delivered reply or a failure. Admission alone is not a delivery receipt. Watch `runtime.failed` for a fatal runtime error and await `runtime.close()` on shutdown.
 
+A signed `inbound.received` event with an agent handler runs in a session dedicated to its source. If `INKBOX_PI_ALLOWED_SENDERS` is set, include the source ID to accept its events. Request bodies up to 64 KiB are passed as data; a completed analysis is available through `runtime.eventResult(event.id)`, not sent to the requester. Script handlers are not executed. Unsupported handlers and exhausted processing retries are reported against the originating delivery.
+
 ## Releases
 
 The initial package version matches the published Inkbox SDK, **0.7.42**. The exact SDK dependency is pinned; subsequent plugin fixes can take their own patch versions. SDK dependency updates are proposed separately and checked against Pi before release.

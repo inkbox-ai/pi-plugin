@@ -89,3 +89,19 @@ test("WhatsApp checks every group member before and after approval", async () =>
   await assert.rejects(() => tool.definition.execute(args, ctx), /allowlist/);
   assert.equal(sends, 1);
 });
+
+test("A2A task follow-ups keep the original task and report the recovery ID on uncertainty", async () => {
+  const { a2aTools } = await import("../extension/tools/a2a.ts");
+  let recorded;
+  const a2a = {
+    fetchCard: async () => ({ rpcUrl: "https://example.test/rpc" }),
+    send: async (_target, args) => { recorded = args; throw new Error("Timed out"); },
+  };
+  const tool = a2aTools({ runtime: { getIdentity: async () => ({ a2aClient: () => a2a }) }, config: ask })
+    .find(t => t.name === "inkbox_a2a_reply");
+  await assert.rejects(() => tool.definition.execute({
+    cardUrl: "https://example.test/card", text: "details", taskId: "current",
+  }, ctx), new RegExp(requestKey(ctx)));
+  assert.equal(recorded.taskId, "current");
+  assert.equal(recorded.messageId, requestKey(ctx));
+});

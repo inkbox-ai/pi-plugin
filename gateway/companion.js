@@ -98,6 +98,7 @@ export async function prepareCompanion(route, client, identity, hasSession) {
     sourceId = route.archivedMessage ?? route.message;
   if (
     trigger.historical !== false ||
+    trigger.senderAccess === "sponsored" ||
     !trigger.author ||
     !allowed(trigger.author, route.allowedSenders)
   )

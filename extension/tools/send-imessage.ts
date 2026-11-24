@@ -171,8 +171,8 @@ export function sendIMessageTools(deps: ToolDeps): RegisteredTool[] {
                 : `Send iMessage to ${toList.join(", ")} (${detail})`,
               metadata: {
                 textChars: text.length,
-                mediaCount:
-                  (mediaUrls?.length ?? 0) + (mediaPaths?.length ?? 0),
+                mediaPaths,
+                mediaUrls,
               },
             });
 

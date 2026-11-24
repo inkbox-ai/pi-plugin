@@ -11,7 +11,7 @@ export const digest = (...fields) =>
   createHash("sha256").update(JSON.stringify(fields)).digest("hex");
 const clean = (s) => (typeof s === "string" ? s.trim() : "");
 const eligibleAccess = (access, envelope, options) =>
-  access == null ||
+  (access == null && !envelope) ||
   access === "direct" ||
   (access === "sponsored" &&
     ["live", "initialization"].includes(envelope?.phase) &&
@@ -41,6 +41,11 @@ function mediaDescription(media) {
 export function parseRoute(event, identity, allowedSenders = [], options = {}) {
   const data = event?.data;
   if (!data || !clean(event.id) || event.id.length > 256) return null;
+  if (
+    options.outbound?.approval === "allowlist" &&
+    !options.outbound?.allowedRecipients?.length
+  )
+    return null;
   let callerId,
     channel,
     sender,
@@ -328,15 +333,23 @@ export function parseRoute(event, identity, allowedSenders = [], options = {}) {
 }
 
 function recipientsAllowed(route, recipients, own) {
-  if (!route.allowedRecipients?.length) return true;
-  if (!Array.isArray(recipients)) return false;
+  const policies = [route.allowedRecipients];
+  if (route.group && !route.companion?.activation && route.channel !== "slack")
+    policies.push(route.allowedSenders);
+  const restricted = policies.filter((list) => list?.length);
+  if (!restricted.length) return true;
+  if (
+    !Array.isArray(recipients) ||
+    recipients.some((value) => typeof value !== "string" || !value.trim())
+  )
+    return false;
   const external = recipients
     .map(normalized)
-    .filter((r) => r && !own.map(normalized).includes(r));
+    .filter((r) => !own.map(normalized).includes(r));
   return (
     external.length > 0 &&
-    external.every((r) =>
-      route.allowedRecipients.some((s) => normalized(s) === r),
+    restricted.every((list) =>
+      external.every((r) => list.some((value) => normalized(value) === r)),
     )
   );
 }
@@ -474,12 +487,19 @@ async function messagingSource(route, identity) {
         (route.subthread || "")
     )
       return false;
-    if (route.allowedRecipients?.length) {
+    if (route.group || source.isGroup || route.allowedRecipients?.length) {
       const destination = whatsapp
         ? await identity.getWhatsAppConversation(route.conversation)
         : await identity.getIMessageConversation(route.conversation);
       if (
         destination.id !== route.conversation ||
+        (source.isGroup === true && destination.isGroup !== true) ||
+        (destination.isGroup &&
+          (!Array.isArray(destination.participants) ||
+            !destination.participants.includes(route.sender) ||
+            destination.participants.some(
+              (p) => !/^\+[1-9]\d{6,14}$/.test(p),
+            ))) ||
         (whatsapp &&
           (destination.agentIdentityId !== identity.id ||
             destination.unresolvedParticipantCount > 0)) ||
@@ -495,7 +515,13 @@ async function messagingSource(route, identity) {
     }
     return true;
   }
-  if (route.channel === "sms" && route.allowedRecipients?.length) {
+  if (
+    route.channel === "sms" &&
+    (route.allowedRecipients?.length ||
+      (route.group &&
+        !route.companion?.activation &&
+        route.allowedSenders.length))
+  ) {
     // A remote participant list can change. For restricted replies, do not rely
     // on an old webhook snapshot to authorize sending into a group.
     const source = await identity.getText(route.message);
@@ -507,7 +533,23 @@ async function messagingSource(route, identity) {
       (source.senderPhoneNumber || source.remotePhoneNumber) !== route.sender
     )
       return false;
-    if (route.group || source.recipients?.length > 1) return false;
+    if (route.group || source.recipients?.length > 1) {
+      // Select the exact current group, never a contact or the first matching telephone number.
+      const page = await identity.listTextConversations({
+        participants: [route.sender],
+        includeGroups: true,
+        limit: 200,
+      });
+      const matches = page.filter((item) => item.id === route.conversation);
+      return (
+        matches.length === 1 &&
+        matches[0].isGroup &&
+        matches[0].participants?.includes(route.sender) &&
+        recipientsAllowed(route, matches[0].participants, [
+          identity.phoneNumber.number,
+        ])
+      );
+    }
     return recipientsAllowed(route, [route.sender], []);
   }
   return true;

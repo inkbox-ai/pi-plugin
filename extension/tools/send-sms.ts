@@ -141,7 +141,7 @@ export function sendSmsTools(deps: ToolDeps): RegisteredTool[] {
               summary: hasConversation
                 ? `Send text to conversation ${conversationId} (${args.text.length} chars)`
                 : `Send text to ${recipients.join(", ")} (${args.text.length} chars)`,
-              metadata: { textChars: args.text.length },
+              metadata: { textChars: args.text.length, mediaPaths: args.mediaPaths, mediaUrls: args.mediaUrls },
             });
 
             if (

@@ -271,3 +271,40 @@ test("subscriptions request receipts for every configured messaging channel", as
   ])
     assert(wanted.includes(type), type);
 });
+
+test("a sender grant does not authorize every destination in an ordinary group", async () => {
+  const evt = sms("hello");
+  delete evt.companion;
+  evt.data.text_message.recipients = [{}, {}];
+  const route = parseRoute(evt, id, ["+12025550122"]);
+  const current = {
+    id: "conversation",
+    isGroup: true,
+    participants: ["+12025550122", "+12025550133"],
+  };
+  const agent = {
+    ...id,
+    getText: async () => ({
+      id: "source",
+      conversationId: "conversation",
+      direction: "inbound",
+      localPhoneNumber: id.phoneNumber.number,
+      senderPhoneNumber: "+12025550122",
+    }),
+    listTextConversations: async () => [current],
+  };
+  assert.equal(await beforeTurn(route, {}, agent), false);
+  const permitted = parseRoute(evt, id, current.participants);
+  assert(await beforeTurn(permitted, {}, agent));
+  current.participants = [...current.participants, "+12025550144"];
+  await assert.rejects(
+    sendReply(permitted, "late answer", "key", {}, agent),
+    /destination changed/,
+  );
+});
+
+test("unclassified Companion messages do not inherit direct access", () => {
+  const evt = sms("Hello");
+  delete evt.data.text_message.sender_access;
+  assert.equal(parseRoute(evt, id), null);
+});

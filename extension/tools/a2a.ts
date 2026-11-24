@@ -1,8 +1,9 @@
 import { z } from "zod";
+import { requestKey } from "../message-key.ts";
 import { runTool } from "../errors.ts";
 import { formatJson } from "../format.ts";
 import { approveOutbound } from "../permissions.ts";
-import type { RegisteredTool, ToolDeps } from "./types.ts";
+import type { RegisteredTool, ToolDeps, ToolContext } from "./types.ts";
 
 const callArgs = {
   cardUrl: z.string().url().describe("A2A Agent Card URL."),
@@ -86,6 +87,22 @@ async function clientFor(deps: ToolDeps): Promise<any> {
   return factory.call(identity);
 }
 
+async function sendTask(client: any, target: any, args: CallArgs | ReplyArgs, ctx: ToolContext) {
+  const messageId = requestKey(ctx, args.messageId);
+  ctx.abort?.throwIfAborted();
+  try {
+    const result = await client.send(target, {
+      text: args.text, taskId: args.taskId,
+      contextId: "contextId" in args ? args.contextId : undefined,
+      messageId,
+    });
+    return formatJson({ ...result, messageId });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "A2A request did not finish";
+    throw new Error(detail + ". For the same request, keep its original messageId: " + messageId);
+  }
+}
+
 export function a2aTools(deps: ToolDeps): RegisteredTool[] {
   const { config } = deps;
   return [
@@ -108,14 +125,7 @@ export function a2aTools(deps: ToolDeps): RegisteredTool[] {
             const a2a = await clientFor(deps);
             try {
               const target = await a2a.fetchCard(args.cardUrl);
-              const messageId = args.messageId ?? ctx.callId;
-              const result = await a2a.send(target, {
-                text: args.text,
-                contextId: args.contextId,
-                taskId: args.taskId,
-                messageId,
-              });
-              return formatJson(result);
+              return await sendTask(a2a, target, args, ctx);
             } finally {
               a2a.close?.();
             }
@@ -165,13 +175,7 @@ export function a2aTools(deps: ToolDeps): RegisteredTool[] {
             const a2a = await clientFor(deps);
             try {
               const target = await a2a.fetchCard(args.cardUrl);
-              const messageId = args.messageId ?? ctx.callId;
-              const result = await a2a.send(target, {
-                taskId: args.taskId,
-                text: args.text,
-                messageId,
-              });
-              return formatJson(result);
+              return await sendTask(a2a, target, args, ctx);
             } finally {
               a2a.close?.();
             }
