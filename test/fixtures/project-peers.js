@@ -368,7 +368,9 @@ export function slackFixture() {
     });
     return {
       id,
-      event_type: "slack.dm_received",
+      event_type: threadTs
+        ? "slack.thread_reply_received"
+        : "slack.dm_received",
       data: {
         identity_id: "agent",
         connection_id: connection.id,
@@ -380,11 +382,12 @@ export function slackFixture() {
         message_ts: ts,
         thread_ts: threadTs,
         sender_access: "direct",
-        message_kinds: ["dm"],
+        message_kinds: threadTs ? ["dm", "thread_reply"] : ["dm"],
         event: {
           type: "message",
           channel: conversation,
           channel_type: "im",
+          ...(threadTs ? { thread_ts: threadTs } : {}),
           user,
           ts,
           text,

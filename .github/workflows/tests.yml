@@ -44,3 +44,14 @@ jobs:
       - name: Validate npm release without publishing
         run: ./publish.sh
       - run: npm run typecheck
+  macos-project-runner:
+    runs-on: macos-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - run: node --test test/project-test-runner.test.js

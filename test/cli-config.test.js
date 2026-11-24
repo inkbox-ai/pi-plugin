@@ -162,3 +162,55 @@ test("login services resolve the real executable behind a transient shell PATH",
     /Cannot find an executable Pi/,
   );
 });
+
+test("direct project bindings, discovery and test argv are validated and scoped to the selected identity", (t) => {
+  const dir = home(t);
+  const env = { HOME: dir, INKBOX_PI_HOME: dir };
+  const bindings = [
+    "email:thread:me@example.test",
+    "sms:conversation:+12025550100",
+    "slack:connection:DROOM:TWORK:UOWNER",
+  ];
+  const argv = ["npm", "test", "--", "argument with spaces"];
+  const project = {
+    trustedConversations: bindings,
+    projectReadWorkspace: true,
+    projectTestCommand: argv,
+  };
+  saveProfile(dir, { identity: "owner", ...project });
+  const loaded = loadConfig(env);
+  for (const [key, value] of Object.entries(project))
+    assert.deepEqual(loaded[key], value);
+  const other = loadConfig({ ...env, INKBOX_IDENTITY: "other" });
+  assert.deepEqual(other.trustedConversations, []);
+  assert.deepEqual(other.projectTestCommand, []);
+  assert.equal(other.projectReadWorkspace, false);
+  const fromEnv = loadConfig({
+    ...env,
+    INKBOX_PI_PROJECT_READ_WORKSPACE: "false",
+    INKBOX_PI_PROJECT_TEST_COMMAND: JSON.stringify(["node", "--test"]),
+    INKBOX_PI_TRUSTED_CONVERSATIONS: bindings.join(","),
+  });
+  assert.equal(fromEnv.projectReadWorkspace, false);
+  assert.deepEqual(fromEnv.projectTestCommand, ["node", "--test"]);
+  for (const bad of ["npm test", "null", "{}", "[42]", '[""]']) {
+    assert.throws(
+      () => loadConfig({ ...env, INKBOX_PI_PROJECT_TEST_COMMAND: bad }),
+      /argument array/,
+    );
+  }
+  for (const bad of [
+    "email:thread:someone",
+    "sms:room:local-number",
+    "slack:conn:CCHANNEL:TEAM:USER",
+  ]) {
+    assert.throws(
+      () => loadConfig({ ...env, INKBOX_PI_TRUSTED_CONVERSATIONS: bad }),
+      /binding/,
+    );
+  }
+  assert.throws(
+    () => loadConfig({ ...env, INKBOX_PI_PROJECT_READ_WORKSPACE: "yes" }),
+    /true or false/,
+  );
+});

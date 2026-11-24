@@ -38,28 +38,57 @@ function encode(value) {
 
 export function encodeProjectAction(request) {
   const kind = request?.kind;
-  const fields = {test: ["command"], question: ["question"], email: ["recipient", "subject", "body"]}[kind];
-  if (!Array.isArray(fields) || Object.keys(request).length !== fields.length + 1)
+  const fields = {
+    test: ["command"],
+    question: ["question"],
+    email: ["recipient", "subject", "body"],
+  }[kind];
+  if (
+    !Array.isArray(fields) ||
+    Object.keys(request).length !== fields.length + 1
+  )
     throw new Error("Invalid project action.");
-  const value = {kind};
+  const value = { kind };
   for (const key of fields) {
     const items = key === "command" ? request[key] : [request[key]];
-    if (!Array.isArray(items) || !items.length || items.length > 64 ||
-      items.some(s => typeof s !== "string" || !s.isWellFormed() || s.length > PROPOSAL_LIMIT || s.includes("\0")))
+    if (
+      !Array.isArray(items) ||
+      !items.length ||
+      items.length > 64 ||
+      items.some(
+        (s) =>
+          typeof s !== "string" ||
+          !s.isWellFormed() ||
+          s.length > PROPOSAL_LIMIT ||
+          s.includes("\0"),
+      )
+    )
       throw new Error("Invalid project action.");
     value[key] = request[key];
   }
-  if (kind === "test" && !value.command[0].trim() ||
-      kind === "question" && !value.question.trim() ||
-      kind === "email" && (!value.body.trim() || !value.subject.trim() || /[\r\n]/.test(value.subject) ||
+  if (
+    (kind === "test" && !value.command[0].trim()) ||
+    (kind === "question" && !value.question.trim()) ||
+    (kind === "email" &&
+      (!value.body.trim() ||
+        !value.subject.trim() ||
+        /[\r\n]/.test(value.subject) ||
         !/^[^\s@,;<>]+@[^\s@,;<>]+$/.test(value.recipient)))
+  )
     throw new Error("Invalid project action.");
   return encode(value);
 }
 
 // Only this package's granted-file extension is loaded in this child. Do not
 // translate arbitrary Pi dialogs (or model text) into requests on the channel.
-export function createEditRpc(stdin, files, confirmEdit, signal, projectAction, command) {
+export function createEditRpc(
+  stdin,
+  files,
+  confirmEdit,
+  signal,
+  projectAction,
+  command,
+) {
   const promptId = "inkbox-turn";
   let accepted = false;
   let settled = false;
@@ -71,9 +100,16 @@ export function createEditRpc(stdin, files, confirmEdit, signal, projectAction, 
   }
   async function handleDialog(event) {
     const response = { type: "extension_ui_response", id: event.id };
-    const edit = event.method === "confirm" && event.title === PROJECT_EDIT_TITLE && confirmEdit;
-    const action = event.method === "input" && event.title === PROJECT_ACTION_TITLE && projectAction;
-    if (pending || (!edit && !action)) return send({ ...response, cancelled: true });
+    const edit =
+      event.method === "confirm" &&
+      event.title === PROJECT_EDIT_TITLE &&
+      confirmEdit;
+    const action =
+      event.method === "input" &&
+      event.title === PROJECT_ACTION_TITLE &&
+      projectAction;
+    if (pending || (!edit && !action))
+      return send({ ...response, cancelled: true });
     pending = true;
     try {
       const encoded = edit ? event.message : event.placeholder;
@@ -81,15 +117,25 @@ export function createEditRpc(stdin, files, confirmEdit, signal, projectAction, 
         throw new Error("Invalid proposal.");
       const proposal = JSON.parse(encoded);
       if (edit) {
-        if (encoded !== encodeEditProposal(proposal) || !files.includes(proposal.file))
+        if (
+          encoded !== encodeEditProposal(proposal) ||
+          !files.includes(proposal.file)
+        )
           throw new Error("Invalid edit.");
-        send({ ...response, confirmed: (await confirmEdit(proposal, signal)) === true });
+        send({
+          ...response,
+          confirmed: (await confirmEdit(proposal, signal)) === true,
+        });
       } else {
-        if (encoded !== encodeProjectAction(proposal) ||
-            proposal.kind === "test" && JSON.stringify(proposal.command) !== JSON.stringify(command))
+        if (
+          encoded !== encodeProjectAction(proposal) ||
+          (proposal.kind === "test" &&
+            JSON.stringify(proposal.command) !== JSON.stringify(command))
+        )
           throw new Error("Invalid project action.");
         const value = await projectAction(proposal, signal);
-        if (typeof value !== "string" || !value || value.length > 12_000) throw new Error("No result.");
+        if (typeof value !== "string" || !value || value.length > 12_000)
+          throw new Error("No result.");
         send({ ...response, value });
       }
     } catch {

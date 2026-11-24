@@ -5,6 +5,8 @@ import {
   createEditRpc,
   encodeEditProposal,
   PROJECT_EDIT_TITLE,
+  encodeProjectAction,
+  PROJECT_ACTION_TITLE,
 } from "../gateway/pi-rpc.js";
 
 test("approval renders a complete inert JSON change or fails instead of truncating", () => {
@@ -72,4 +74,50 @@ test("only canonical, granted, exact Pi dialogs can authorize one replacement; a
   wait.resolve(true);
   await setImmediate();
   assert.equal(records.length, before);
+});
+
+test("only exact configured argv and canonical single-recipient actions reach the broker", async () => {
+  const command = ["npm", "test"];
+  const records = [],
+    proposals = [];
+  const rpc = createEditRpc(
+    {
+      writable: true,
+      write(s) {
+        records.push(JSON.parse(s));
+      },
+    },
+    [],
+    undefined,
+    new AbortController().signal,
+    async (p) => {
+      proposals.push(p);
+      return "broker result";
+    },
+    command,
+  );
+  const send = (encoded) =>
+    rpc.handle({
+      type: "extension_ui_request",
+      method: "input",
+      id: "request",
+      title: PROJECT_ACTION_TITLE,
+      placeholder: encoded,
+    });
+  send(encodeProjectAction({ kind: "test", command: ["npm", "start"] }));
+  send(
+    JSON.stringify({
+      kind: "email",
+      recipient: "one@example.org,two@example.org",
+      subject: "s",
+      body: "b",
+    }),
+  );
+  send('{"kind":"question","question":"q","command":["other"]}');
+  assert.deepEqual(proposals, []);
+  assert.ok(records.every((r) => r.cancelled === true));
+  send(encodeProjectAction({ kind: "test", command }));
+  await setImmediate();
+  assert.deepEqual(proposals, [{ kind: "test", command }]);
+  assert.equal(records.at(-1).value, "broker result");
 });

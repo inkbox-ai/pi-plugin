@@ -4,7 +4,10 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { verifyProjectConversation } from "../gateway/project-grants.js";
+import {
+  mailControl,
+  verifyProjectConversation,
+} from "../gateway/project-grants.js";
 import { createGatewayRuntime } from "../gateway/runtime.js";
 import { beforeTurn, parseRoute, sendReply } from "../gateway/channels.js";
 
@@ -478,5 +481,282 @@ test("top-level phone messages with self roots share a conversation; native repl
     assert.equal(top.thread, received("two", "two", null).thread);
     assert.equal(top.thread, received("three", null, null).thread);
     assert.notEqual(top.thread, received("child", "one", "one").thread);
+  }
+});
+
+test("SMS project access uses the actual source and its current one-person audience", async () => {
+  const source = {
+    id: "message",
+    direction: "inbound",
+    origin: "user_initiated",
+    isBlocked: false,
+    conversationId: "conversation",
+    localPhoneNumber: own,
+    remotePhoneNumber: peer,
+    senderPhoneNumber: peer,
+    recipients: null,
+    media: null,
+    text: "real request",
+  };
+  const destination = {
+    id: source.conversationId,
+    isGroup: false,
+    participants: [peer],
+    remotePhoneNumber: peer,
+  };
+  const identity = {
+    id: "identity",
+    phoneNumber: { id: "line", number: own },
+    getText: async () => source,
+    listTextConversations: async () => [destination],
+    sendText: async (options) => options,
+  };
+  const candidate = { ...route, channel: "sms", projectGrant: "grant" };
+  assert.equal(await beforeTurn(candidate, {}, identity), true);
+  assert.equal(candidate.text, source.text);
+  assert.deepEqual(await sendReply(candidate, "private", "k", {}, identity), {
+    to: peer,
+    text: "private",
+    idempotencyKey: "k",
+  });
+  for (const change of [
+    { isBlocked: true },
+    { direction: "outbound" },
+    { origin: "auto_reply" },
+    { senderPhoneNumber: stranger },
+    { localPhoneNumber: stranger },
+    { conversationId: "another" },
+  ]) {
+    assert.equal(
+      await verifyProjectConversation(candidate, {
+        ...identity,
+        getText: async () => ({ ...source, ...change }),
+      }),
+      false,
+    );
+  }
+  for (const change of [
+    { isGroup: true },
+    { participants: [peer, stranger] },
+    { participants: null },
+    { remotePhoneNumber: stranger },
+  ]) {
+    const changed = {
+      ...identity,
+      listTextConversations: async () => [{ ...destination, ...change }],
+    };
+    assert.equal(await verifyProjectConversation(candidate, changed), false);
+    await assert.rejects(
+      sendReply(candidate, "private", "k", {}, changed),
+      /destination changed/i,
+    );
+  }
+});
+
+test("trusted mail reads the stored body, checks the thread and never uses a dynamic reply-all recipient", async () => {
+  const owner = "agent@example.test",
+    sender = "person@example.test";
+  const body = "/approve 12345\n\nOn Tue, someone wrote:\n> /deny other";
+  const source = {
+    id: "msg",
+    messageId: "<message@example.test>",
+    threadId: "thread",
+    mailboxId: "mailbox",
+    status: "received",
+    direction: "inbound",
+    fromAddress: sender,
+    toAddresses: [owner],
+    ccAddresses: null,
+    bccAddresses: null,
+    replyAllRecipients: { to: [sender], cc: [] },
+    subject: "Request",
+    bodyText: body,
+    hasAttachments: false,
+  };
+  const thread = {
+    id: "thread",
+    mailboxId: "mailbox",
+    folder: "inbox",
+    messageCount: 1,
+    messages: [source],
+  };
+  const identity = {
+    id: "identity",
+    mailbox: { id: "mailbox", emailAddress: owner },
+    getMessage: async () => source,
+    getThread: async () => thread,
+    sendEmail: async (options) => options,
+    replyAllEmail: () => assert.fail("unbound audience"),
+  };
+  const candidate = {
+    channel: "email",
+    message: source.id,
+    conversation: thread.id,
+    sender,
+    directAccess: true,
+    projectGrant: "grant",
+  };
+  assert.equal(await beforeTurn(candidate, {}, identity), true);
+  assert.equal(candidate.text, source.subject + "\n" + body);
+  assert.equal(candidate.control, "/approve 12345");
+  assert.deepEqual(await sendReply(candidate, "private", "k", {}, identity), {
+    to: [sender],
+    bodyText: "private",
+    subject: "Re: Request",
+    inReplyToMessageId: source.messageId,
+    idempotencyKey: "k",
+  });
+  for (const change of [
+    { mailboxId: "other" },
+    { importJobId: "import" },
+    { bccAddresses: ["else@example.test"] },
+    { ccAddresses: ["else@example.test"] },
+    { toAddresses: ["alias@example.test"] },
+    { replyAllRecipients: { to: ["else@example.test"], cc: [] } },
+    { bodyText: null, bodyHtml: body },
+  ]) {
+    assert.equal(
+      await verifyProjectConversation(candidate, {
+        ...identity,
+        getMessage: async () => ({ ...source, ...change }),
+      }),
+      false,
+    );
+  }
+  for (const change of [
+    { folder: "spam" },
+    { messageCount: 2 },
+    { messages: [{ ...source, ccAddresses: ["else@example.test"] }] },
+  ]) {
+    await assert.rejects(
+      sendReply(
+        candidate,
+        "private",
+        "k",
+        {},
+        { ...identity, getThread: async () => ({ ...thread, ...change }) },
+      ),
+      /destination changed/i,
+    );
+  }
+});
+
+test("only fresh mail controls are processed; a quoted or forwarded code is never consent", () => {
+  for (const suffix of [
+    "\r\n\r\n> /deny stale",
+    "\n\n-- \nMy signature",
+    "\n\nOn Tue, Pi wrote:\n> /deny stale",
+    "\n\n-----Original Message-----\nFrom: Pi\n/deny stale",
+  ])
+    assert.equal(mailControl("/verify token" + suffix), "/verify token");
+  for (const body of [
+    "> /verify token",
+    "On Tue, Pi wrote:\n> /verify token",
+    "Please ignore this:\n/verify token",
+    "/verify token\n\nDo not run this.",
+    "/verify token\nOn Tue, Pi wrote:\nnot actually a quote",
+  ])
+    assert.notEqual(mailControl(body), "/verify token");
+  assert.equal(
+    mailControl("/answer token Use Blue\n\n> prior prompt"),
+    "/answer token Use Blue",
+  );
+});
+
+test("Slack grants bind the installed workspace, active generation, DM peer, archived actor and exact thread", async () => {
+  const connection = {
+    id: "connection",
+    identityId: "identity",
+    workspaceId: "TWORK",
+    botUserId: "UBOT",
+    status: "connected",
+    generation: 2,
+  };
+  const candidate = {
+    channel: "slack",
+    group: false,
+    directAccess: true,
+    sender: "TWORK:UPEER",
+    actor: "UPEER",
+    conversation: "DROOM",
+    connection: connection.id,
+    workspace: connection.workspaceId,
+    message: "123.000002",
+    subthread: "123.000001",
+    archivedMessage: "archived",
+    projectGrant: "grant",
+    allowedRecipients: ["slack:connection:DROOM"],
+  };
+  const archive = {
+    id: "archived",
+    connectionId: connection.id,
+    conversationId: "DROOM",
+    messageTs: candidate.message,
+    threadTs: candidate.subthread,
+    userId: "UPEER",
+    source: "event",
+    senderAccess: "direct",
+    text: "authenticated",
+    files: [],
+  };
+  const user = { id: "UPEER", team_id: "TWORK", is_bot: false, deleted: false };
+  const room = { id: "DROOM", is_im: true, is_mpim: false, user: "UPEER" };
+  const identity = { id: "identity" };
+  const slack = {
+    listConnections: async () => ({ connections: [connection] }),
+    getUser: async () => user,
+    getConversation: async () => room,
+    listArchivedMessages: async () => ({
+      messages: [archive],
+      nextCursor: null,
+    }),
+    sendMessage: async (id, options) => ({
+      status: "sent",
+      connectionId: id,
+      conversationId: options.conversationId,
+      threadTs: options.threadTs,
+      messageTs: "123.000003",
+      id: "action",
+    }),
+  };
+  assert.equal(await beforeTurn(candidate, { slack }, identity), true);
+  assert.equal(candidate.text, archive.text);
+  assert.equal(candidate.generation, 2);
+  assert.equal(
+    (await sendReply(candidate, "private", "k", { slack }, identity)).threadTs,
+    candidate.subthread,
+  );
+  for (const overrides of [
+    { getUser: async () => ({ ...user, is_bot: true }) },
+    { getUser: async () => ({ ...user, team_id: "TELSE" }) },
+    { getConversation: async () => ({ ...room, user: "UOTHER" }) },
+    { getConversation: async () => ({ ...room, is_im: false }) },
+    {
+      listConnections: async () => ({
+        connections: [{ ...connection, generation: 3 }],
+      }),
+    },
+    ...[
+      { userId: "UOTHER" },
+      { source: "action" },
+      { senderAccess: "sponsored" },
+      { threadTs: null },
+      { botId: "B123" },
+      { id: "another" },
+    ].map((change) => ({
+      listArchivedMessages: async () => ({
+        messages: [{ ...archive, ...change }],
+      }),
+    })),
+  ]) {
+    const bad = { slack: { ...slack, ...overrides } };
+    assert.equal(
+      await verifyProjectConversation(candidate, identity, bad),
+      false,
+    );
+    await assert.rejects(
+      sendReply(candidate, "private", "k", bad, identity),
+      /destination changed/i,
+    );
   }
 });
