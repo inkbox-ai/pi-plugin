@@ -361,14 +361,14 @@ function command(prompt, word = "approve") {
   return match[0];
 }
 
-const editChannels = {
+const directChannels = {
   imessage: () => nativePhoneFixture("imessage"),
   whatsapp: () => nativePhoneFixture("whatsapp"),
   sms: smsFixture,
   slack: slackFixture,
   email: emailFixture,
 };
-for (const [channel, makeFixture] of Object.entries(editChannels))
+for (const [channel, makeFixture] of Object.entries(directChannels))
   test(
     `real Pi edits a granted file only after approval from the original ${channel} conversation`,
     { timeout: 45_000 },
@@ -479,135 +479,160 @@ for (const [channel, makeFixture] of Object.entries(editChannels))
     },
   );
 
-test(
-  "real Pi investigates a project, runs the approved test, asks the requester and emails only the approved result",
-  { timeout: 75_000 },
-  async (t) => {
-    const fixture = nativePhoneFixture("imessage");
-    const { identity, replies } = fixture;
-    const emails = [];
-    identity.mailbox = { id: "mailbox", emailAddress: "agent@example.test" };
-    identity.sendEmail = async (message) => {
-      emails.push(message);
-      return { id: "outbound-" + emails.length, status: "sent" };
-    };
-    const file = "project.txt";
-    const source = "src/check.js";
-    const recipient = "release@example.test",
-      subject = "Project check",
-      body = "The release fixture passed.";
-    const question = "Who should receive the release check?";
-    const reply = "Please send it to release@example.test.";
-    const final = "I tested the project and emailed the approved result.";
-    const actions = [
-      { name: "inkbox_project_search", args: { query: "release fixture" } },
-      { name: "inkbox_project_read", args: { file: source } },
-      { name: "inkbox_project_test", args: {} },
-      { name: "inkbox_project_ask", args: { question } },
-      { name: "inkbox_project_email", args: { recipient, subject, body } },
-    ];
-    const { workspace, runtime, requests, submit } = await projectSession(
-      t,
-      fixture,
-      (n) => actions[n] ?? final,
-      {
-        // The owner configures the exact test. Pi supplies no arguments.
-        projectReadWorkspace: true,
-        projectTestCommand: ["node", source],
-      },
-    );
-    mkdirSync(join(workspace, "src"));
-    writeFileSync(
-      join(workspace, source),
-      [
-        "// release fixture: hydrate inputs",
-        'const assert = require("node:assert/strict");',
-        'const value = require("node:fs").readFileSync("project.txt", "utf8").trim();',
-        'assert.equal(value, "release fixture passed");',
-        "console.log(value.toUpperCase());",
-      ].join("\n"),
-    );
-    execFileSync("/usr/bin/git", ["init", "--quiet", workspace]);
-    execFileSync("/usr/bin/git", ["-C", workspace, "add", "--", source]);
-    writeFileSync(join(workspace, file), "release fixture passed\n");
-    assert.equal(
-      submit(
-        "work",
-        "owners-chat",
-        "Investigate the release fixture, run its test, and ask where to send the result.",
-      ),
-      "accepted",
-    );
-    await until(
-      () => replies.length >= 1,
-      "The gateway did not ask to run the configured test",
-    );
-    assert.match(replies[0].text, /node/);
-    assert.match(replies[0].text, /src\/check\.js/);
-    assert.equal(requests.length, 3);
-    const toolOutput = (requestIndex, tool) => {
-      const result = requests[requestIndex].messages.find(
-        (m) => m.role === "tool" && m.tool_call_id === "call_" + tool,
+for (const [channel, makeFixture] of Object.entries(directChannels))
+  test(
+    `real Pi investigates, tests, asks and emails the approved result via ${channel}`,
+    { timeout: 75_000 },
+    async (t) => {
+      const fixture = makeFixture();
+      const { identity, replies } = fixture;
+      const emails = [];
+      identity.mailbox ??= {
+        id: "mailbox",
+        emailAddress: "agent@example.test",
+      };
+      const replyByEmail = identity.sendEmail?.bind(identity);
+      identity.sendEmail = async (message) => {
+        if (message.inReplyToMessageId) return replyByEmail(message);
+        emails.push(message);
+        return { id: "outbound-" + emails.length, status: "sent" };
+      };
+      const file = "project.txt";
+      const source = "src/check.js";
+      const recipient = "release@example.test",
+        subject = "Project check",
+        body = "The release fixture passed.";
+      const question = "Who should receive the release check?";
+      const reply = "Please send it to release@example.test.";
+      const final = "I tested the project and emailed the approved result.";
+      const actions = [
+        { name: "inkbox_project_search", args: { query: "release fixture" } },
+        { name: "inkbox_project_read", args: { file: source } },
+        { name: "inkbox_project_test", args: {} },
+        { name: "inkbox_project_ask", args: { question } },
+        { name: "inkbox_project_email", args: { recipient, subject, body } },
+      ];
+      const { workspace, runtime, requests, submit } = await projectSession(
+        t,
+        fixture,
+        (n) => actions[n] ?? final,
+        {
+          // The owner configures the exact test. Pi supplies no arguments.
+          slackEnabled: channel === "slack",
+          projectReadWorkspace: true,
+          projectTestCommand: ["node", source],
+        },
       );
-      assert.ok(result, "Missing real Pi result for " + tool);
-      return typeof result.content === "string"
-        ? result.content
-        : JSON.stringify(result.content);
-    };
-    assert.match(toolOutput(1, "inkbox_project_search"), /src\/check\.js/);
-    assert.match(
-      toolOutput(2, "inkbox_project_read"),
-      /release fixture: hydrate inputs/,
-    );
-    assert.equal(emails.length, 0);
-    const approveTest = command(replies[0].text);
-    assert.equal(
-      submit("approve-test", "owners-chat", approveTest),
-      "accepted",
-    );
+      mkdirSync(join(workspace, "src"));
+      writeFileSync(
+        join(workspace, source),
+        [
+          "// release fixture: hydrate inputs",
+          'const assert = require("node:assert/strict");',
+          'const value = require("node:fs").readFileSync("project.txt", "utf8").trim();',
+          'assert.equal(value, "release fixture passed");',
+          "console.log(value.toUpperCase());",
+        ].join("\n"),
+      );
+      execFileSync("/usr/bin/git", ["init", "--quiet", workspace]);
+      execFileSync("/usr/bin/git", ["-C", workspace, "add", "--", source]);
+      writeFileSync(join(workspace, file), "release fixture passed\n");
+      assert.equal(
+        submit(
+          "work",
+          "owners-chat",
+          "Investigate the release fixture, run its test, and ask where to send the result.",
+        ),
+        "accepted",
+      );
+      const offset = channel === "email" ? 1 : 0;
+      if (offset) {
+        await until(
+          () => replies.length === 1,
+          "Expected a mailbox proof before the model was contacted",
+        );
+        assert.equal(requests.length, 0);
+        assert.equal(
+          submit("proof", "owners-chat", command(replies[0].text, "verify")),
+          "accepted",
+        );
+      }
+      await until(
+        () => replies.length >= 1 + offset,
+        "The gateway did not ask to run the configured test",
+      );
+      assert.match(replies[offset].text, /node/);
+      assert.match(replies[offset].text, /src\/check\.js/);
+      assert.equal(requests.length, 3);
+      const toolOutput = (requestIndex, tool) => {
+        const result = requests[requestIndex].messages.find(
+          (m) => m.role === "tool" && m.tool_call_id === "call_" + tool,
+        );
+        assert.ok(result, "Missing real Pi result for " + tool);
+        return typeof result.content === "string"
+          ? result.content
+          : JSON.stringify(result.content);
+      };
+      assert.match(toolOutput(1, "inkbox_project_search"), /src\/check\.js/);
+      assert.match(
+        toolOutput(2, "inkbox_project_read"),
+        /release fixture: hydrate inputs/,
+      );
+      assert.equal(emails.length, 0);
+      const approveTest = command(replies[offset].text);
+      assert.equal(
+        submit("approve-test", "owners-chat", approveTest),
+        "accepted",
+      );
 
-    await until(
-      () => replies.length >= 2,
-      "Pi did not forward its follow-up question",
-    );
-    assert.match(replies[1].text, /Who should receive the release check\?/);
-    assert.equal(requests.length, 4);
-    const testResult = toolOutput(3, "inkbox_project_test");
-    assert.match(testResult, /exit 0/);
-    assert.match(testResult, /RELEASE FIXTURE PASSED/);
-    const answer = command(replies[1].text, "answer") + " " + reply;
-    assert.equal(submit("foreign-answer", "other-chat", answer), "ignored");
-    assert.equal(submit("answer", "owners-chat", answer), "accepted");
+      await until(
+        () => replies.length >= 2 + offset,
+        "Pi did not forward its follow-up question",
+      );
+      assert.match(
+        replies[offset + 1].text,
+        /Who should receive the release check\?/,
+      );
+      assert.equal(requests.length, 4);
+      const testResult = toolOutput(3, "inkbox_project_test");
+      assert.match(testResult, /exit 0/);
+      assert.match(testResult, /RELEASE FIXTURE PASSED/);
+      const answer = command(replies[offset + 1].text, "answer") + " " + reply;
+      assert.equal(submit("foreign-answer", "other-chat", answer), "ignored");
+      assert.equal(submit("answer", "owners-chat", answer), "accepted");
 
-    await until(
-      () => replies.length >= 3,
-      "Pi did not request approval of the exact email",
-    );
-    assert.equal(requests.length, 5);
-    assert.ok(toolOutput(4, "inkbox_project_ask").includes(reply));
-    for (const detail of [recipient, subject, body])
-      assert.ok(replies[2].text.includes(detail));
-    assert.equal(emails.length, 0);
-    const approveEmail = command(replies[2].text);
-    assert.notEqual(approveEmail, approveTest);
-    assert.equal(submit("reused-token", "owners-chat", approveTest), "ignored");
-    assert.equal(
-      submit("approve-email", "owners-chat", approveEmail),
-      "accepted",
-    );
+      await until(
+        () => replies.length >= 3 + offset,
+        "Pi did not request approval of the exact email",
+      );
+      assert.equal(requests.length, 5);
+      assert.ok(toolOutput(4, "inkbox_project_ask").includes(reply));
+      for (const detail of [recipient, subject, body])
+        assert.ok(replies[offset + 2].text.includes(detail));
+      assert.equal(emails.length, 0);
+      const approveEmail = command(replies[offset + 2].text);
+      assert.notEqual(approveEmail, approveTest);
+      assert.equal(
+        submit("reused-token", "owners-chat", approveTest),
+        "ignored",
+      );
+      assert.equal(
+        submit("approve-email", "owners-chat", approveEmail),
+        "accepted",
+      );
 
-    await until(
-      () => runtime.eventState("work") === "done",
-      "The requester did not receive Pi's completion",
-    );
-    assert.equal(requests.length, 6);
-    assert.match(toolOutput(5, "inkbox_project_email"), /Email sent\./);
-    assert.equal(emails.length, 1);
-    const { idempotencyKey, ...sent } = emails[0];
-    assert.ok(idempotencyKey);
-    assert.deepEqual(sent, { to: [recipient], subject, bodyText: body });
-    assert.equal(replies.length, 4);
-    assert.ok(replies.every((r) => r.conversationId === "owners-chat"));
-    assert.equal(replies.at(-1).text, final);
-  },
-);
+      await until(
+        () => runtime.eventState("work") === "done",
+        "The requester did not receive Pi's completion",
+      );
+      assert.equal(requests.length, 6);
+      assert.match(toolOutput(5, "inkbox_project_email"), /Email sent\./);
+      assert.equal(emails.length, 1);
+      const { idempotencyKey, ...sent } = emails[0];
+      assert.ok(idempotencyKey);
+      assert.deepEqual(sent, { to: [recipient], subject, bodyText: body });
+      assert.equal(replies.length, 4 + offset);
+      assert.ok(replies.every((r) => r.conversationId === "owners-chat"));
+      assert.equal(replies.at(-1).text, final);
+    },
+  );

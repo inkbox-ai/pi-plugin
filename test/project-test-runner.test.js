@@ -5,6 +5,7 @@ import {
   mkdir,
   writeFile,
   readFile,
+  realpath,
   rm,
   symlink,
 } from "node:fs/promises";
@@ -165,6 +166,9 @@ test(
       );
     const marker = join(dir, "private-runtime-marker");
     await writeFile(marker, "never staged");
+    const dataAlias = "/System/Volumes/Data" + (await realpath(marker));
+    if (process.platform === "darwin")
+      assert.equal(await readFile(dataAlias, "utf8"), "never staged");
     const output = await run(
       'const fs = require("node:fs"), assert = require("node:assert/strict");' +
         "assert.throws(() => fs.readFileSync(" +
@@ -172,7 +176,7 @@ test(
         "));" +
         (process.platform === "darwin"
           ? "assert.throws(() => fs.readFileSync(" +
-            JSON.stringify("/System/Volumes/Data" + marker) +
+            JSON.stringify(dataAlias) +
             "));"
           : "") +
         'console.log("x".repeat(14000));',
