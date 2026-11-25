@@ -1,3 +1,4 @@
+import { slackConnectionStatus } from "./identity-status.js";
 import { createServer } from "node:http";
 import { once } from "node:events";
 import { verifyWebhook } from "@inkbox/sdk";
@@ -95,14 +96,7 @@ export async function startGateway(config) {
   }
   // Slack installation and local opt-in are independent. A failed optional
   // lookup must not block the other channels or be reported as disconnected.
-  const slackConnected = await client.slack
-    .listConnections(identity.id)
-    .then(({ connections }) =>
-      connections.some(
-        (c) => c.identityId === identity.id && c.status === "connected",
-      ),
-    )
-    .catch(() => undefined);
+  const slackConnected = await slackConnectionStatus(client, identity.id);
   try {
     runtime = createGatewayRuntime(
       config,

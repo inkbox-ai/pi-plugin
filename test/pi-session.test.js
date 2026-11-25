@@ -74,6 +74,26 @@ function modelResponse(res, text) {
   ]);
 }
 
+function modelTool(res, name, args) {
+  streamCompletion(res, [
+    [
+      {
+        role: "assistant",
+        tool_calls: [
+          {
+            index: 0,
+            id: "call_" + name,
+            type: "function",
+            function: { name, arguments: JSON.stringify(args) },
+          },
+        ],
+      },
+      null,
+    ],
+    [{}, "tool_calls"],
+  ]);
+}
+
 function configurePi(t, home, agentDir, api) {
   const saved = { ...process.env };
   Object.assign(process.env, {
@@ -132,10 +152,14 @@ test(
       }
       if (url.pathname === "/v1/chat/completions") {
         modelRequests.push(body);
-        modelResponse(
-          res,
-          modelRequests.length === 1 ? "first answer" : "second answer",
-        );
+        if (modelRequests.length === 2) modelTool(res, "inkbox_whoami", {});
+        else if (modelRequests.length === 3)
+          modelTool(res, "inkbox_doctor", {});
+        else
+          modelResponse(
+            res,
+            modelRequests.length === 1 ? "first answer" : "second answer",
+          );
       } else if (req.headers["x-api-key"] !== "fixture") json({}, 401);
       else if (url.pathname === "/api/whoami")
         json({
@@ -147,7 +171,18 @@ test(
         url.pathname === "/api/v1/identities"
       )
         json([identity]);
-      else if (url.pathname === "/api/v1/identities/fixture") json(identity);
+      else if (url.pathname === "/api/v1/identities/fixture")
+        json(
+          modelRequests.length >= 2
+            ? {
+                ...identity,
+                imessage_number: {
+                  ...identity.imessage_number,
+                  number: "+12025550119",
+                },
+              }
+            : identity,
+        );
       else if (url.pathname === "/api/v1/identities/fixture/signing-key")
         json({ configured: true });
       else if (
@@ -266,7 +301,19 @@ test(
     await deliver("first", "first question"); // retry after restart must not wake the model
     await deliver("second", "follow-up question");
     await sent.promise;
-    assert.equal(modelRequests.length, 2);
+    assert.equal(modelRequests.length, 4);
+    const identityResult = modelRequests[2].messages.find(
+      (m) => m.tool_call_id === "call_inkbox_whoami",
+    );
+    assert.match(JSON.stringify(identityResult?.content), /12025550119/);
+    const doctorResult = modelRequests[3].messages.find(
+      (m) => m.tool_call_id === "call_inkbox_doctor",
+    );
+    assert.match(JSON.stringify(doctorResult?.content), /inkbox_whoami/);
+    assert.doesNotMatch(
+      JSON.stringify(doctorResult?.content),
+      /inkbox_send|inkbox_project/,
+    );
     for (const request of modelRequests) {
       const instructions = JSON.stringify(
         request.messages.filter((m) =>
@@ -304,7 +351,10 @@ test(
       JSON.stringify(modelRequests[1].messages),
       /follow-up question/,
     );
-    assert.deepEqual(modelRequests[1].tools ?? [], []);
+    assert.deepEqual(
+      modelRequests[1].tools.map((t) => t.function.name).sort(),
+      ["inkbox_doctor", "inkbox_whoami"],
+    );
     assert.deepEqual(
       replies.map((r) => [r.conversation_id, r.text]),
       [
@@ -344,23 +394,7 @@ async function projectSession(t, fixture, respond, config = {}) {
       return;
     }
     const { name, args } = next;
-    streamCompletion(res, [
-      [
-        {
-          role: "assistant",
-          tool_calls: [
-            {
-              index: 0,
-              id: "call_" + name,
-              type: "function",
-              function: { name, arguments: JSON.stringify(args) },
-            },
-          ],
-        },
-        null,
-      ],
-      [{}, "tool_calls"],
-    ]);
+    modelTool(res, name, args);
   });
   const api = "http://127.0.0.1:" + (await listen(server));
   configurePi(t, home, agentDir, api);
@@ -489,11 +523,13 @@ for (const [channel, makeFixture] of Object.entries(directChannels))
       );
       const tools = requests[0].tools.map((tool) => tool.function);
       assert.deepEqual(tools.map(({ name }) => name).sort(), [
+        "inkbox_doctor",
         "inkbox_project_ask",
         "inkbox_project_email",
         "inkbox_project_read",
         "inkbox_project_replace",
         "inkbox_project_search",
+        "inkbox_whoami",
       ]);
       for (const tool of tools.filter(({ name }) =>
         ["inkbox_project_read", "inkbox_project_replace"].includes(name),

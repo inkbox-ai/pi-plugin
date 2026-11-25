@@ -1,3 +1,4 @@
+import { isToolEnabled } from "../extension/selection.js";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { StringDecoder } from "node:string_decoder";
@@ -76,18 +77,42 @@ export function runPiTurn(
     );
     if (config.projectTestCommand?.length) names.push("inkbox_project_test");
   }
-  const tools = projectAccess
+  const diagnostics = [
+    "email",
+    "sms",
+    "imessage",
+    "whatsapp",
+    "slack",
+  ].includes(route.channel)
+    ? ["inkbox_whoami", "inkbox_doctor"].filter(
+        (name) =>
+          (name !== "inkbox_whoami" || config.lookupIdentity) &&
+          isToolEnabled(
+            { name, group: "diagnostics", defaultEnabled: true },
+            new Set(config.tools?.enable),
+            new Set(config.tools?.disable),
+          ),
+      )
+    : [];
+  names.push(...diagnostics);
+  const lookup = diagnostics.includes("inkbox_whoami") && config.lookupIdentity;
+  const useRpc = directEdit || Boolean(lookup);
+  const tools = names.length
     ? [
         "--no-builtin-tools",
-        "-e",
-        fileURLToPath(new URL("./project-tools.js", import.meta.url)),
+        ...(projectAccess
+          ? [
+              "-e",
+              fileURLToPath(new URL("./project-tools.js", import.meta.url)),
+            ]
+          : []),
         "--tools",
         names.join(","),
       ]
     : ["--no-tools"];
   const args = [
     "--mode",
-    ...(directEdit ? ["rpc"] : ["json", "--print"]),
+    ...(useRpc ? ["rpc"] : ["json", "--print"]),
     ...tools,
     ...restricted,
     "-e",
@@ -97,12 +122,16 @@ export function runPiTurn(
   ];
   return new Promise((resolve, reject) => {
     const env = piEnvironment();
+    env.INKBOX_PI_DIAGNOSTICS = JSON.stringify(diagnostics);
     env.INKBOX_PI_BRIDGE_CONTEXT =
       bridgeInstructions(config, route) +
       (route.channel === "a2a" ? " " + A2A_RESPONSE_INSTRUCTIONS : "") +
+      (lookup
+        ? " Use inkbox_whoami for questions about current identity, channel availability or assigned numbers. If the lookup fails, say so."
+        : "") +
       (projectAccess
-        ? " Only the named project tools are authorized for this caller."
-        : " This turn has no tools. Do not offer to run commands, inspect files or make changes from this conversation.") +
+        ? " Only the listed tools are authorized for this caller."
+        : " No project or send tools are available. Do not offer to run commands, inspect files or make changes from this conversation.") +
       (directEdit
         ? " Use the project tools to investigate the request. If clarification is needed, ask through the question tool. File replacements, the configured test, and sending an email each need their own approval. Report the actual test result and distinguish email submission from delivery; never invent either."
         : "");
@@ -127,7 +156,7 @@ export function runPiTurn(
     const turnTimeoutMs = 300_000;
     const turnDeadline = performance.now() + turnTimeoutMs;
     const rpc =
-      directEdit &&
+      useRpc &&
       createEditRpc(
         child.stdin,
         config.projectFiles ?? [],
@@ -148,6 +177,7 @@ export function runPiTurn(
               turnDeadline - performance.now() - 10_000,
             )),
         config.projectTestCommand,
+        lookup,
       );
     function stop() {
       lifetime.abort();

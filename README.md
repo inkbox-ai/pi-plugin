@@ -74,7 +74,7 @@ If your model credential exists only in a shell variable, set `INKBOX_PI_MODEL_E
 
 ### Project work from a direct conversation
 
-A trusted sender can ask Pi to investigate code, run a configured test, ask a follow-up, and email the result. This works in a one-to-one **email thread, SMS, native iMessage, WhatsApp, or connected Slack DM**. It does not share history across channels or expose a general shell. Other senders still get ordinary, reply-only conversations.
+A trusted sender can ask Pi to investigate code, run a configured test, ask a follow-up, and email the result. This works in a one-to-one **email thread, SMS, native iMessage, WhatsApp, or connected Slack DM**. It does not share history across channels or expose a general shell. Ordinary messaging turns have two read-only diagnostics by default: `inkbox_whoami` looks up the identity’s current channels and numbers, and `inkbox_doctor` lists the model and tools available in that turn. Neither can read message history, send a separate message, or access project files.
 
 Set `INKBOX_PI_TRUSTED_CONVERSATIONS` to a comma-separated list of exact bindings. Use Inkbox conversation or thread IDs, not contact display names:
 

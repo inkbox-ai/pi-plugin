@@ -1,3 +1,4 @@
+import { identityStatus, slackConnectionStatus } from "./identity-status.js";
 import { isToolEnabled } from "../extension/selection.js";
 import { runProjectTest } from "./project-test.js";
 import { journalDirectory } from "./journal.js";
@@ -70,20 +71,19 @@ export function createGatewayRuntime(
   const turnConfig = {
     ...config,
     identity: identity.agentHandle || config.identity,
-    mailboxAddress: identity.emailAddress || identity.mailbox?.emailAddress,
-    smsNumber: identity.phoneNumber?.number,
-    channelFacts: {
-      emailAssigned: Boolean(identity.mailbox || identity.emailAddress),
-      smsAssigned: Boolean(identity.phoneNumber?.number),
-      smsLineStatus: identity.phoneNumber?.status,
-      outboundSmsStatus: identity.phoneNumber?.smsStatus,
-      imessageEnabled: identity.imessageEnabled,
-      dedicatedIMessageNumber: identity.imessageNumber?.number,
-      whatsappEnabled: identity.whatsappEnabled,
-      whatsappConfigured: identity.whatsappConfigured,
-      whatsappNumber: identity.whatsappNumber,
-      slackConnected,
-      slackGatewayEnabled: config.slackEnabled === true,
+    ...identityStatus(identity, config.slackEnabled, slackConnected),
+    async lookupIdentity() {
+      const current = await client.getIdentity(identity.agentHandle);
+      if (
+        current.id !== identity.id ||
+        current.agentHandle !== identity.agentHandle
+      )
+        throw new Error("Identity changed.");
+      return identityStatus(
+        current,
+        config.slackEnabled,
+        await slackConnectionStatus(client, current.id),
+      );
     },
   };
   const dir = journalDirectory(config, identity);

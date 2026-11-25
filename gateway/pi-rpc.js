@@ -1,6 +1,7 @@
 // Exact, single-line change shown to the owner. Bidi controls, newlines and
 // invisible Unicode must not be able to rearrange the surrounding instructions.
 const PROPOSAL_LIMIT = 1200;
+export const IDENTITY_LOOKUP_TITLE = "Inkbox identity lookup";
 export const PROJECT_ACTION_TITLE = "Inkbox project action";
 export const PROJECT_EDIT_TITLE = "Inkbox project edit";
 
@@ -88,6 +89,7 @@ export function createEditRpc(
   signal,
   projectAction,
   command,
+  lookupIdentity,
 ) {
   const promptId = "inkbox-turn";
   let accepted = false;
@@ -108,10 +110,19 @@ export function createEditRpc(
       event.method === "input" &&
       event.title === PROJECT_ACTION_TITLE &&
       projectAction;
-    if (pending || (!edit && !action))
+    const lookup =
+      event.method === "input" &&
+      event.title === IDENTITY_LOOKUP_TITLE &&
+      lookupIdentity;
+    if (pending || (!edit && !action && !lookup))
       return send({ ...response, cancelled: true });
     pending = true;
     try {
+      if (lookup)
+        return send({
+          ...response,
+          value: JSON.stringify(await lookupIdentity()),
+        });
       const encoded = edit ? event.message : event.placeholder;
       if (typeof encoded !== "string" || encoded.length > PROPOSAL_LIMIT)
         throw new Error("Invalid proposal.");
