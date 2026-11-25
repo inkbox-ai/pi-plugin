@@ -1,4 +1,4 @@
-import { isToolEnabled } from "../extension/selection.ts";
+import { isToolEnabled } from "../extension/selection.js";
 import { runProjectTest } from "./project-test.js";
 import { journalDirectory } from "./journal.js";
 import {

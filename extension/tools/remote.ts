@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { RemoteMcp } from "@inkbox/sdk/remote-mcp";
 import { z } from "zod";
 import { approveOutbound } from "../permissions.ts";
-import { isToolEnabled } from "../selection.ts";
+import { isToolEnabled } from "../selection.js";
 import type { RegisteredTool, ToolContext, ToolDeps } from "./types.ts";
 
 // Only relay operations with a known local policy. In particular, the generic

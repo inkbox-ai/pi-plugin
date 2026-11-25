@@ -95,6 +95,12 @@ try {
     { cwd: workspace, env },
   );
   assert.match(help.stdout, /bootstrap/);
+  // The gateway runs in plain Node, without the extension loader Pi supplies.
+  await promisify(execFile)(
+    process.execPath,
+    ["--input-type=module", "-e", 'await import("@inkbox/pi-plugin/runtime")'],
+    { cwd: join(env.PI_CODING_AGENT_DIR, "npm"), env },
+  );
   child = spawn(pi, ["--mode", "rpc", "--no-session"], {
     cwd: workspace,
     env,

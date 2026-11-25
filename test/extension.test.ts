@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import inkbox from "../extension/index.ts";
 import { approveOutbound } from "../extension/permissions.ts";
-import { isToolEnabled } from "../extension/selection.ts";
+import { isToolEnabled } from "../extension/selection.js";
 import { whatsappTools } from "../extension/tools/whatsapp.ts";
 
 test("Pi can register tools without credentials and shows setup commands", async () => {

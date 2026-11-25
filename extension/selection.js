@@ -1,10 +1,9 @@
-import type { RegisteredTool } from "./tools/types.ts";
-
-export function isToolEnabled(
-  tool: RegisteredTool,
-  enable: Set<string>,
-  disable: Set<string>,
-): boolean {
+/**
+ * @param {import("./tools/types.ts").RegisteredTool} tool
+ * @param {Set<string>} enable
+ * @param {Set<string>} disable
+ */
+export function isToolEnabled(tool, enable, disable) {
   if (disable.has(tool.name)) return false;
   if (enable.has(tool.name)) return true;
   if (tool.sensitive) return false;

@@ -4,7 +4,7 @@ import { z } from "zod";
 import { loadConfig } from "../cli/config.js";
 import { createInkboxRuntime } from "./client.ts";
 import { createVaultRuntime } from "./vault.ts";
-import { isToolEnabled } from "./selection.ts";
+import { isToolEnabled } from "./selection.js";
 import { a2aTools } from "./tools/a2a.ts";
 import { accessTools } from "./tools/access.ts";
 import { contactRuleTools } from "./tools/contact-rules.ts";
