@@ -98,7 +98,7 @@ export function runPiTurn(
       (route.channel === "a2a" ? " " + A2A_RESPONSE_INSTRUCTIONS : "") +
       (projectAccess
         ? " Only the named project tools are authorized for this caller."
-        : "") +
+        : " This turn has no tools. Do not offer to run commands, inspect files or make changes from this conversation.") +
       (directEdit
         ? " Use the project tools to investigate the request. If clarification is needed, ask through the question tool. File replacements, the configured test, and sending an email each need their own approval. Report the actual test result and distinguish email submission from delivery; never invent either."
         : "");
