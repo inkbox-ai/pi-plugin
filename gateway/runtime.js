@@ -63,7 +63,7 @@ function flush(path) {
 export function createGatewayRuntime(
   config,
   { client, identity, turn = runPiTurn, reply = sendReply, logger = console },
-  { paused = false } = {},
+  { paused = false, slackConnected } = {},
 ) {
   if (!identity?.id || !config.home)
     throw problem("Gateway identity and state directory required.");
@@ -72,6 +72,19 @@ export function createGatewayRuntime(
     identity: identity.agentHandle || config.identity,
     mailboxAddress: identity.emailAddress || identity.mailbox?.emailAddress,
     smsNumber: identity.phoneNumber?.number,
+    channelFacts: {
+      emailAssigned: Boolean(identity.mailbox || identity.emailAddress),
+      smsAssigned: Boolean(identity.phoneNumber?.number),
+      smsLineStatus: identity.phoneNumber?.status,
+      outboundSmsStatus: identity.phoneNumber?.smsStatus,
+      imessageEnabled: identity.imessageEnabled,
+      dedicatedIMessageNumber: identity.imessageNumber?.number,
+      whatsappEnabled: identity.whatsappEnabled,
+      whatsappConfigured: identity.whatsappConfigured,
+      whatsappNumber: identity.whatsappNumber,
+      slackConnected,
+      slackGatewayEnabled: config.slackEnabled === true,
+    },
   };
   const dir = journalDirectory(config, identity);
   mkdirSync(dir, { recursive: true, mode: 0o700 });

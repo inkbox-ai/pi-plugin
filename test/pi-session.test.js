@@ -27,7 +27,20 @@ const identity = {
   id: "agent",
   agent_handle: "fixture",
   organization_id: "organization",
-  phone_number: { id: "phone", number: "+12025550101" },
+  phone_number: {
+    id: "phone",
+    number: "+12025550101",
+    status: "active",
+    sms_status: "ready",
+  },
+  imessage_enabled: true,
+  imessage_number: {
+    id: "line",
+    number: "+12025550109",
+    type: "dedicated_outbound",
+  },
+  whatsapp_enabled: true,
+  whatsapp_configured: true,
 };
 
 async function listen(server) {
@@ -264,6 +277,26 @@ test(
       assert.match(instructions, /Your Inkbox handle: @fixture/);
       assert.match(instructions, /Current channel: SMS/);
       assert.match(instructions, /Your SMS number: \+12025550101/);
+      const system = request.messages.find((m) =>
+        ["system", "developer"].includes(m.role),
+      );
+      const content =
+        typeof system.content === "string"
+          ? system.content
+          : system.content.map((block) => block.text).join("\n");
+      const facts = JSON.parse(
+        content
+          .split(
+            "Identity messaging configuration at gateway startup (missing fields are unknown): ",
+          )[1]
+          .split("\n")[0],
+      );
+      assert.equal(facts.dedicatedIMessageNumber, "+12025550109");
+      assert.equal(facts.imessageEnabled, true);
+      assert.equal(facts.whatsappEnabled, true);
+      assert.equal(facts.outboundSmsStatus, "ready");
+      assert.equal(facts.slackGatewayEnabled, false);
+      assert.equal(facts.slackConnected, undefined); // Unavailable lookup is not a negative result.
       assert.doesNotMatch(instructions, /first question|follow-up question/);
     }
     assert.match(JSON.stringify(modelRequests[1].messages), /first answer/);

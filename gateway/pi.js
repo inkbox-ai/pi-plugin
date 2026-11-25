@@ -27,6 +27,10 @@ function bridgeInstructions(config, route) {
   return [
     "Pi is your harness. Inkbox delivers messages; it does not replace your persona. When asked who you are, identify yourself by your configured handle and role. Do not guess the underlying model.",
     ...identity,
+    config.channelFacts &&
+      "Identity messaging configuration at gateway startup (missing fields are unknown): " +
+        JSON.stringify(config.channelFacts),
+    "These identity channels are distinct from the tools permitted on this turn. A reply-only turn does not mean the identity has no channels. Never substitute the SMS number for an iMessage or WhatsApp number. A dedicated iMessage number identifies the identity’s line, not necessarily the line assigned to this particular conversation. If asked for a chat-specific number you cannot verify, say so.",
     "Current channel: " + channelGuidance[route.channel],
     route.group &&
       "This is a group conversation; your reply is visible to the group.",

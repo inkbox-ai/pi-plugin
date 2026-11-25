@@ -93,11 +93,21 @@ export async function startGateway(config) {
   } catch (error) {
     throw startupProblem("signing key verification", error);
   }
+  // Slack installation and local opt-in are independent. A failed optional
+  // lookup must not block the other channels or be reported as disconnected.
+  const slackConnected = await client.slack
+    .listConnections(identity.id)
+    .then(({ connections }) =>
+      connections.some(
+        (c) => c.identityId === identity.id && c.status === "connected",
+      ),
+    )
+    .catch(() => undefined);
   try {
     runtime = createGatewayRuntime(
       config,
       { client, identity },
-      { paused: true },
+      { paused: true, slackConnected },
     );
   } catch (error) {
     throw startupProblem("state initialization", error);
