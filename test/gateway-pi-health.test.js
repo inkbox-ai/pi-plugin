@@ -3,8 +3,10 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
-import { runPiTurn } from "../gateway/pi.js";
-import { checkPiModel } from "../gateway/preflight.js";
+import { A2A_RESPONSE_INSTRUCTIONS } from "../extension/a2a-outcome.js";
+import { DEFAULT_AUTO_ALLOWED_TOOLS, runPiTurn } from "../gateway/pi.js";
+import { checkPiModel, restricted, turnFlags } from "../gateway/preflight.js";
+import { frameInbound, systemContext } from "../gateway/prompts.js";
 import { failureCategory, startupProblem } from "../gateway/diagnostics.js";
 import { boundedReply } from "../gateway/reply-limits.js";
 
@@ -15,32 +17,90 @@ async function executable(t, source) {
   await writeFile(file, "#!/usr/bin/env node\n" + source, { mode: 0o700 });
   return { piBin: file, projectDirectory: dir };
 }
-async function transcript(t, reasons) {
-  const messages = reasons.map((stopReason) => ({
-    type: "message_end",
-    message: {
-      role: "assistant",
-      stopReason,
-      content: [
-        { type: "text", text: stopReason === "stop" ? "complete" : "partial" },
-      ],
-      errorMessage: "authorization test: invalid API key: secret-fixture",
-    },
-  }));
-  const config = await executable(
-    t,
-    "process.stdin.resume();\n" +
-      messages
-        .map((m) => "console.log(" + JSON.stringify(JSON.stringify(m)) + ");")
-        .join("\n"),
-  );
+// A stand-in for Pi's RPC mode: read the prompt, print the records chosen for
+// it, and exit once the gateway closes stdin.
+function rpcFixture(records) {
+  return `
+    const accepted = (prompt) => ({ type: "response", id: prompt.id, command: "prompt", success: true, data: { disposition: "started" } });
+    const settled = { type: "agent_settled" };
+    let input = "", answered = false;
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => {
+      input += chunk;
+      if (answered || !input.includes("\\n")) return;
+      answered = true;
+      const prompt = JSON.parse(input.slice(0, input.indexOf("\\n")));
+      for (const record of (${records})(prompt, accepted(prompt), settled))
+        console.log(JSON.stringify(record));
+    });
+  `;
+}
+const assistant = (stopReason, text) => ({
+  type: "message_end",
+  message: {
+    role: "assistant",
+    stopReason,
+    content: [{ type: "text", text }],
+    errorMessage: "authorization test: invalid API key: secret-fixture",
+  },
+});
+const smsRoute = { channel: "sms", sender: "contact", text: "hello" };
+async function run(t, source, route = smsRoute) {
+  const config = await executable(t, source);
   return runPiTurn(
     config,
-    { channel: "sms", sender: "contact", text: "hello" },
+    route,
     join(config.projectDirectory, "session.jsonl"),
     new AbortController().signal,
   );
 }
+function transcript(t, reasons) {
+  const messages = reasons.map((stopReason) =>
+    assistant(stopReason, stopReason === "stop" ? "complete" : "partial"),
+  );
+  return run(
+    t,
+    rpcFixture(
+      "(prompt, accepted, settled) => [accepted, ..." +
+        JSON.stringify(messages) +
+        ", settled]",
+    ),
+  );
+}
+// The fixture answers with what Pi was started with and the prompt it was sent.
+async function launch(t, config, route, askPermission) {
+  const fixture = await executable(
+    t,
+    rpcFixture(`(prompt, accepted, settled) => [accepted, {
+      type: "message_end",
+      message: {
+        role: "assistant",
+        stopReason: "stop",
+        content: [{ type: "text", text: JSON.stringify({
+          args: process.argv.slice(2),
+          turn: JSON.parse(process.env.INKBOX_PI_TURN),
+          inkboxEnv: Object.keys(process.env).filter((name) => name.startsWith("INKBOX_")),
+          prompt: prompt.message,
+        }) }],
+      },
+    }, settled]`),
+  );
+  const session = join(fixture.projectDirectory, "session.jsonl");
+  const seen = JSON.parse(
+    await runPiTurn(
+      { ...config, ...fixture },
+      route,
+      session,
+      new AbortController().signal,
+      askPermission,
+    ),
+  );
+  return { ...seen, session };
+}
+// Someone in the conversation can be asked; an agent task has nobody.
+const attended = async () => "reject";
+const unattended = Object.assign(async () => "reject", { unattended: true });
+
 test("Pi can recover from an intermediate error; only the final completed answer is returned", async (t) => {
   assert.equal(await transcript(t, ["error", "toolUse", "stop"]), "complete");
 });
@@ -55,9 +115,166 @@ test("incomplete/error model output is not delivered, and no private error detai
       transcript(t, ["stop", reason]),
       (error) =>
         error.category === category &&
+        // The turn had started: it must not be run again.
+        error.started !== false &&
         !String(error).includes("secret-fixture"),
     );
   }
+});
+test("a messaging turn starts Pi with its tools, skills and one-time turn settings", async (t) => {
+  const saved = process.env.INKBOX_API_KEY;
+  process.env.INKBOX_API_KEY = "ambient-fixture";
+  t.after(() => {
+    if (saved === undefined) delete process.env.INKBOX_API_KEY;
+    else process.env.INKBOX_API_KEY = saved;
+  });
+  const config = {
+    apiKey: "turn-fixture",
+    baseUrl: "https://example.com",
+    identity: "fixture",
+    identityId: "agent-id",
+    home: "/profile",
+    tools: { disable: ["inkbox_place_call"] },
+    outbound: { approval: "ask" },
+    slackEnabled: false,
+    handle: "fixture",
+    smsNumber: "+12025550101",
+  };
+  const route = {
+    channel: "sms",
+    sender: "+12025550102",
+    conversation: "conversation",
+    text: "hello",
+    contact: { id: "contact-1", name: "Alex" },
+    memories: ["Prefers short answers."],
+  };
+  const seen = await launch(t, config, route, attended);
+  assert.deepEqual(seen.args.slice(0, 2), ["--mode", "rpc"]);
+  const skill = seen.args.indexOf("--skill");
+  assert.ok(skill > 0 && /skills$/.test(seen.args[skill + 1]));
+  // Pi's own tools are added to whatever the resumed session had selected.
+  const tools = seen.args[seen.args.indexOf("--tools") + 1].split(",");
+  assert.ok(seen.args.includes("--tools"));
+  assert.ok(tools.every((name) => name.startsWith("+")));
+  for (const name of ["read", "bash", "edit", "write", "grep", "find", "ls"])
+    assert.ok(tools.includes("+" + name), name);
+  for (const flag of turnFlags) assert.ok(seen.args.includes(flag), flag);
+  for (const flag of ["--no-tools", "--no-skills", "--no-context-files"])
+    assert.ok(!seen.args.includes(flag), flag);
+  const [extensionFlag, extension, sessionFlag, session] = seen.args.slice(-4);
+  assert.deepEqual([extensionFlag, sessionFlag], ["-e", "--session"]);
+  assert.match(extension, /turn-extension\.ts$/);
+  assert.equal(session, seen.session);
+  // Only the turn settings cross into Pi's environment.
+  assert.deepEqual(seen.inkboxEnv, ["INKBOX_PI_TURN"]);
+  assert.deepEqual(seen.turn, {
+    context: systemContext(config, route),
+    autoAllowedTools: DEFAULT_AUTO_ALLOWED_TOOLS,
+    profile: {
+      apiKey: "turn-fixture",
+      baseUrl: "https://example.com",
+      identity: "fixture",
+      expectedIdentityId: "agent-id",
+      home: "/profile",
+      tools: { disable: ["inkbox_place_call"] },
+      outbound: { approval: "ask" },
+      slackEnabled: false,
+      signingKeyConfigured: false,
+    },
+  });
+  assert.equal(seen.prompt, frameInbound(route));
+  assert.match(seen.prompt, /^\[inkbox:sms from=\+12025550102 /);
+
+  const configured = await launch(
+    t,
+    { ...config, autoAllowedTools: ["read"] },
+    route,
+    attended,
+  );
+  assert.deepEqual(configured.turn.autoAllowedTools, ["read"]);
+});
+test("with nobody to ask, no Pi tool runs unasked", async (t) => {
+  const config = { identity: "fixture", autoAllowedTools: ["read", "bash"] };
+  const task = {
+    channel: "a2a",
+    sender: "peer",
+    conversation: "task",
+    text: "Do it",
+  };
+  const agentTask = await launch(t, config, task, unattended);
+  assert.deepEqual(agentTask.turn.autoAllowedTools, []);
+  assert.equal(
+    agentTask.turn.context,
+    systemContext(config, task) + "\n\n" + A2A_RESPONSE_INSTRUCTIONS,
+  );
+  assert.equal(agentTask.prompt, frameInbound(task));
+  const noCallback = await launch(t, config, { ...smsRoute });
+  assert.deepEqual(noCallback.turn.autoAllowedTools, []);
+});
+test("an external event still runs Pi without tools, skills, context files or an account profile", async (t) => {
+  const route = {
+    channel: "external",
+    sender: "source",
+    text: '{"body":"data"}',
+  };
+  const seen = await launch(
+    t,
+    { apiKey: "turn-fixture", identity: "fixture" },
+    route,
+    unattended,
+  );
+  assert.deepEqual(seen.args.slice(0, 3), ["--mode", "rpc", "--no-tools"]);
+  for (const flag of restricted) assert.ok(seen.args.includes(flag), flag);
+  assert.ok(!seen.args.includes("--skill"));
+  assert.ok(!seen.args.includes("--tools"));
+  assert.equal(seen.turn.profile, null);
+  assert.deepEqual(seen.turn.autoAllowedTools, []);
+  assert.match(seen.turn.context, /untrusted data/);
+  assert.doesNotMatch(JSON.stringify(seen.turn), /turn-fixture/);
+  assert.equal(seen.prompt, route.text);
+});
+test("a Pi process that exits before accepting the prompt can be retried; its stderr is kept for the operator log", async (t) => {
+  await assert.rejects(
+    run(
+      t,
+      `process.stdin.once("data", () =>
+        process.stderr.write("extension failed to load\\n", () => process.exit(1)),
+      );`,
+    ),
+    (error) =>
+      error.category === "pi-incomplete" &&
+      error.started === false &&
+      error.detail === "extension failed to load" &&
+      !String(error).includes("extension failed to load"),
+  );
+});
+function refusal(t, error) {
+  return run(
+    t,
+    rpcFixture(
+      "(prompt) => [{ type: 'response', id: prompt.id, command: 'prompt', success: false, error: " +
+        JSON.stringify(error) +
+        " }]",
+    ),
+  );
+}
+test("a prompt that Pi refuses never started, so the turn can be retried", async (t) => {
+  await assert.rejects(
+    refusal(t, "The agent is busy: secret-fixture"),
+    (error) =>
+      error.category === "pi-protocol" &&
+      error.started === false &&
+      !String(error).includes("secret-fixture"),
+  );
+});
+test("a prompt refused for missing model credentials is reported as a credential problem", async (t) => {
+  await assert.rejects(
+    refusal(t, "No API key found for the selected provider: secret-fixture"),
+    (error) =>
+      error.category === "pi-auth" &&
+      error.started === false &&
+      !String(error).includes("secret-fixture"),
+  );
 });
 test("model preflight verifies selected provider credentials without issuing a model prompt", async (t) => {
   const config = await executable(

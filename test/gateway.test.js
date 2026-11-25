@@ -225,6 +225,7 @@ test(
     try {
       runtime.acceptVerified(sms("first", "Can you help?"));
       await started.promise;
+      runtime.acceptVerified(sms("second", "One more thing"));
       const other = sms("other", "/stop");
       other.data.text_message.sender_phone_number = "+12025550109";
       runtime.acceptVerified(other);
@@ -232,10 +233,13 @@ test(
         await new Promise((r) => setTimeout(r, 5));
       assert.equal(runtime.eventState("evt-other"), "ignored");
       assert.equal(otherReplies, 0);
-      assert.notEqual(runtime.eventState("evt-first"), "canceled");
+      assert.equal(runtime.eventState("evt-first"), "running");
+      assert.equal(runtime.eventState("evt-second"), "queued");
       runtime.acceptVerified(sms("owner", "/cancel"));
-      assert.match(await ownerReply.promise, /Stopped/);
-      assert.equal(runtime.eventState("evt-first"), "canceled");
+      assert.match(await ownerReply.promise, /Stopped.*may remain/);
+      // A started turn may already have acted; a waiting one never ran.
+      assert.equal(runtime.eventState("evt-first"), "uncertain");
+      assert.equal(runtime.eventState("evt-second"), "canceled");
       assert.deepEqual(prompts, ["Can you help?"]);
     } finally {
       await runtime.close();
@@ -626,6 +630,267 @@ test(
       while (runtime.eventState("evt-startup") !== "done")
         await new Promise((resolve) => setTimeout(resolve, 5));
       assert.deepEqual(seen, ["startup"]);
+    } finally {
+      await runtime.close();
+      await rm(home, { recursive: true, force: true });
+    }
+  },
+);
+
+test("one source message is admitted once, whichever session its sender resolves to", async () => {
+  const home = await mkdtemp(join(tmpdir(), "inkbox-pi-"));
+  const runtime = createGatewayRuntime(
+    { home },
+    { identity, client: {}, turn: () => assert.fail("paused") },
+    { paused: true },
+  );
+  try {
+    const first = sms("1");
+    const replay = { ...sms("1"), id: "evt-replay" };
+    replay.data.contacts = [{ id: "contact-1", name: "Alex" }];
+    const [anonymous, known] = [first, replay].map((event) =>
+      parseRoute(event, identity),
+    );
+    assert.notEqual(anonymous.thread, known.thread);
+    assert.equal(anonymous.source, known.source);
+    assert.equal(runtime.acceptVerified(first), "accepted");
+    assert.equal(runtime.acceptVerified(replay), "duplicate");
+    assert.equal(runtime.eventState("evt-replay"), "queued");
+  } finally {
+    await runtime.close();
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test(
+  "a turn that fails after it started is recorded once and never rerun",
+  { timeout: 5000 },
+  async () => {
+    const home = await mkdtemp(join(tmpdir(), "inkbox-pi-"));
+    const logs = [],
+      replied = [];
+    let turns = 0;
+    const runtime = createGatewayRuntime(
+      { home },
+      {
+        identity,
+        client: {},
+        logger: {
+          error(...args) {
+            logs.push(args);
+          },
+        },
+        async turn(_, route, file) {
+          turns++;
+          if (route.message === "broken")
+            throw Object.assign(new Error("turn failed"), {
+              detail: "extension did not load",
+            });
+          await writeFile(file, route.text);
+          return "Fine.";
+        },
+        async reply(route) {
+          replied.push(route.message);
+        },
+      },
+    );
+    try {
+      runtime.acceptVerified(sms("broken"));
+      while (runtime.eventState("evt-broken") !== "failed")
+        await new Promise((r) => setTimeout(r, 5));
+      assert.deepEqual(
+        { ...runtime.lastFailure("evt-broken") },
+        { attempt: 1, category: "event-processing" },
+      );
+      assert.ok(logs.some((args) => args.includes("extension did not load")));
+      runtime.acceptVerified(sms("next"));
+      while (runtime.eventState("evt-next") !== "done")
+        await new Promise((r) => setTimeout(r, 5));
+      assert.equal(turns, 2);
+      assert.equal(runtime.eventState("evt-broken"), "failed");
+      assert.deepEqual(replied, ["next"]);
+    } finally {
+      await runtime.close();
+      await rm(home, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "a turn that Pi never started is queued again and retried after a pause",
+  { timeout: 10000 },
+  async () => {
+    const home = await mkdtemp(join(tmpdir(), "inkbox-pi-"));
+    const replied = [];
+    let turns = 0;
+    const runtime = createGatewayRuntime(
+      { home },
+      {
+        identity,
+        client: {},
+        logger: { error() {} },
+        async turn(_, route, file) {
+          if (++turns === 1)
+            throw Object.assign(new Error("Pi did not start"), {
+              started: false,
+            });
+          await writeFile(file, route.text);
+          return "Fine.";
+        },
+        async reply(route) {
+          replied.push(route.message);
+        },
+      },
+    );
+    try {
+      runtime.acceptVerified(sms("unstarted"));
+      while (!runtime.lastFailure("evt-unstarted"))
+        await new Promise((r) => setTimeout(r, 5));
+      // Nothing can have run, so the same message is tried again.
+      assert.equal(runtime.eventState("evt-unstarted"), "queued");
+      assert.equal(turns, 1);
+      while (runtime.eventState("evt-unstarted") !== "done")
+        await new Promise((r) => setTimeout(r, 25));
+      assert.equal(turns, 2);
+      assert.deepEqual(replied, ["unstarted"]);
+    } finally {
+      await runtime.close();
+      await rm(home, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "a turn interrupted by shutdown is uncertain after restart, not replayed",
+  { timeout: 5000 },
+  async () => {
+    const home = await mkdtemp(join(tmpdir(), "inkbox-pi-"));
+    const config = { home, baseUrl: "https://example.com" };
+    const started = Promise.withResolvers();
+    let turns = 0,
+      replies = 0;
+    const deps = {
+      identity,
+      client: {},
+      async turn(_, _route, _file, signal) {
+        turns++;
+        started.resolve();
+        await new Promise((_, reject) =>
+          signal.addEventListener("abort", () => reject(new Error("aborted")), {
+            once: true,
+          }),
+        );
+      },
+      async reply() {
+        replies++;
+      },
+    };
+    let runtime = createGatewayRuntime(config, deps);
+    try {
+      runtime.acceptVerified(sms("1"));
+      await started.promise;
+      assert.equal(runtime.eventState("evt-1"), "running");
+      await runtime.close();
+      runtime = createGatewayRuntime(config, deps);
+      assert.equal(runtime.eventState("evt-1"), "uncertain");
+      assert.equal(runtime.acceptVerified(sms("1")), "duplicate");
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      assert.equal(runtime.eventState("evt-1"), "uncertain");
+      assert.equal(turns, 1);
+      assert.equal(replies, 0);
+    } finally {
+      await runtime.close();
+      await rm(home, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "clearing a conversation mid-turn says that the stopped turn's work may remain",
+  { timeout: 5000 },
+  async () => {
+    const home = await mkdtemp(join(tmpdir(), "inkbox-pi-"));
+    const started = Promise.withResolvers(),
+      cleared = Promise.withResolvers();
+    const runtime = createGatewayRuntime(
+      { home },
+      {
+        identity,
+        client: {},
+        async turn(_, _route, _file, signal) {
+          started.resolve();
+          await new Promise((_, reject) =>
+            signal.addEventListener(
+              "abort",
+              () => reject(new Error("aborted")),
+              { once: true },
+            ),
+          );
+        },
+        async reply(route, answer) {
+          if (route.message === "reset") cleared.resolve(answer);
+        },
+      },
+    );
+    try {
+      runtime.acceptVerified(sms("working", "Start the long job"));
+      await started.promise;
+      runtime.acceptVerified(sms("reset", "/new"));
+      const answer = await cleared.promise;
+      assert.match(answer, /cleared/);
+      assert.match(answer, /may remain/);
+      assert.equal(runtime.eventState("evt-working"), "uncertain");
+    } finally {
+      await runtime.close();
+      await rm(home, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "a turn gets the gateway's identity facts and an approval callback; phone replies are plain text",
+  { timeout: 5000 },
+  async () => {
+    const home = await mkdtemp(join(tmpdir(), "inkbox-pi-"));
+    const sent = Promise.withResolvers(),
+      seen = [];
+    const runtime = createGatewayRuntime(
+      { home },
+      {
+        identity,
+        client: {},
+        async turn(config, route, file, signal, askPermission) {
+          seen.push({
+            identityId: config.identityId,
+            smsNumber: config.smsNumber,
+            lookupIdentity: "lookupIdentity" in config,
+            signal: signal instanceof AbortSignal,
+            askPermission: typeof askPermission,
+            state: runtime.eventState("evt-" + route.message),
+          });
+          await writeFile(file, route.text);
+          return "**Done**. See `notes.md`:\n* one\n* two";
+        },
+        async reply(_, answer) {
+          sent.resolve(answer);
+        },
+      },
+    );
+    try {
+      runtime.acceptVerified(sms("1"));
+      const answer = await sent.promise;
+      assert.match(answer, /^Done\. See notes\.md:/);
+      assert.doesNotMatch(answer, /[*`]/);
+      assert.deepEqual(seen, [
+        {
+          identityId: identity.id,
+          smsNumber: identity.phoneNumber.number,
+          lookupIdentity: false,
+          signal: true,
+          askPermission: "function",
+          state: "running",
+        },
+      ]);
     } finally {
       await runtime.close();
       await rm(home, { recursive: true, force: true });

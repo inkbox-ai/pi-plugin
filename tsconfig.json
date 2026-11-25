@@ -9,5 +9,5 @@
     "strict": true,
     "skipLibCheck": true
   },
-  "include": ["extension/**/*.ts", "test/embedding.types.ts"]
+  "include": ["extension/**/*.ts", "gateway/**/*.ts", "test/embedding.types.ts"]
 }

@@ -12,6 +12,14 @@ export const restricted = [
   "--no-themes",
   "--no-approve",
 ];
+// A messaging turn keeps Pi's context files and skills; only ambient
+// extensions are replaced by this package's own turn extension.
+export const turnFlags = [
+  "--no-extensions",
+  "--no-prompt-templates",
+  "--no-themes",
+  "--no-approve",
+];
 export function piEnvironment() {
   const env = { ...process.env, NO_COLOR: "1" };
   for (const name of Object.keys(env))

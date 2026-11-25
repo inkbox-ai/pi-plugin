@@ -41,7 +41,26 @@ function policy(value: unknown): ToolDeps["config"]["outbound"]["approval"] {
 }
 
 export default function inkbox(pi: ExtensionAPI) {
-  const config = loadConfig();
+  registerInkbox(pi, loadConfig());
+}
+
+type ToolExecutionContext = Parameters<
+  Parameters<ExtensionAPI["registerTool"]>[0]["execute"]
+>[4];
+
+// The gateway registers the same catalog for a turn it starts, and answers
+// confirmations by asking the person in the conversation.
+export function registerInkbox(
+  pi: ExtensionAPI,
+  config: ReturnType<typeof loadConfig>,
+  gateway?: {
+    confirm(
+      ctx: ToolExecutionContext,
+      request: { title: string; message: string; patterns?: string[] },
+      signal?: AbortSignal,
+    ): Promise<boolean>;
+  },
+) {
   const runtime = createInkboxRuntime(config);
   const deps: ToolDeps = {
     runtime,
@@ -83,7 +102,10 @@ export default function inkbox(pi: ExtensionAPI) {
   const status = () => ({
     identity: config.identity || null,
     credentialConfigured: Boolean(config.apiKey),
-    gatewaySigningKeyConfigured: Boolean(config.signingKey),
+    gatewaySigningKeyConfigured: Boolean(
+      config.signingKey ||
+        (config as { signingKeyConfigured?: boolean }).signingKeyConfigured,
+    ),
     outboundApproval: deps.config.outbound.approval,
     enabledTools: tools
       .filter((t) => isToolEnabled(t, enabled, disabled))
@@ -111,16 +133,36 @@ export default function inkbox(pi: ExtensionAPI) {
       definition: {
         args: {},
         description:
-          "Verify the active Inkbox identity, email, phone number and iMessage availability.",
+          "Show this agent's live Inkbox identity: handle, email address, SMS number, iMessage and WhatsApp numbers, and which channels are enabled.",
         execute: async () => {
           const identity = await runtime.getIdentity();
+          const imessageNumber = identity.imessageNumber?.number ?? null;
           return JSON.stringify({
             id: identity.id,
             handle: identity.agentHandle,
-            email: identity.mailbox?.emailAddress,
-            phone: identity.phoneNumber?.number,
+            displayName: identity.displayName ?? null,
+            email: identity.emailAddress ?? identity.mailbox?.emailAddress ?? null,
+            phone: identity.phoneNumber?.number ?? null,
+            smsStatus: identity.phoneNumber?.smsStatus ?? null,
             imessageEnabled: identity.imessageEnabled,
+            imessageNumber,
             whatsappEnabled: identity.whatsappEnabled,
+            whatsappNumber: identity.whatsappNumber ?? null,
+            lines: {
+              phone: identity.phoneNumber?.number
+                ? "Your own number for SMS."
+                : "No SMS number is provisioned.",
+              imessage: !identity.imessageEnabled
+                ? "iMessage is not enabled."
+                : imessageNumber
+                  ? "Your own iMessage number. It is a separate line from the SMS number unless the two values are equal."
+                  : "iMessage uses a shared line with no number of its own; people reach you by connecting through Inkbox.",
+              whatsapp: !identity.whatsappEnabled
+                ? "WhatsApp is not enabled."
+                : identity.whatsappNumber
+                  ? "Your own WhatsApp number."
+                  : "WhatsApp uses a shared number with no number of its own.",
+            },
           });
         },
       },
@@ -143,18 +185,23 @@ export default function inkbox(pi: ExtensionAPI) {
       name: tool.name,
       label: tool.name,
       description: tool.definition.description,
+      // Lists the tool in Pi's own summary of available tools.
+      promptSnippet: tool.definition.description.split(/(?<=\.)\s/)[0],
       parameters: parameters as Parameters<
         ExtensionAPI["registerTool"]
       >[0]["parameters"],
       async execute(callId, args, signal, _onUpdate, ctx) {
         signal?.throwIfAborted();
-        const result = await tool.definition.execute(schema.parse(args), {
+        const parsed = schema.parse(args);
+        const result = await tool.definition.execute(parsed, {
           callId,
           sessionID: ctx.sessionManager.getSessionId(),
           directory: ctx.cwd,
           abort: signal,
-          confirm: async (title, message) =>
-            ctx.hasUI && (await ctx.ui.confirm(title, message, { signal })),
+          confirm: async (title, message, patterns) =>
+            gateway
+              ? gateway.confirm(ctx, { title, message, patterns }, signal)
+              : ctx.hasUI && (await ctx.ui.confirm(title, message, { signal })),
         });
         return {
           content: [
@@ -168,6 +215,7 @@ export default function inkbox(pi: ExtensionAPI) {
       },
     });
   }
+  if (gateway) return;
   pi.registerCommand("inkbox-status", {
     description: "Inspect the local Inkbox configuration",
     handler: async (_args, ctx) => {

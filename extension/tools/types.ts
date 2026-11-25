@@ -7,7 +7,12 @@ export interface ToolContext {
   sessionID: string;
   abort?: AbortSignal;
   directory: string;
-  confirm(title: string, message: string): Promise<boolean>;
+  /** `patterns` names what an "always allow" answer would cover. */
+  confirm(
+    title: string,
+    message: string,
+    patterns?: string[],
+  ): Promise<boolean>;
 }
 export interface ToolDeps {
   runtime: InkboxRuntime;

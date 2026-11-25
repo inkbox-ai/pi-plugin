@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  digest,
   parseRoute,
   beforeTurn,
   sendReply,
@@ -518,4 +519,188 @@ test("blocked messages and changes to a group audience prevent WhatsApp replies"
   dest.participants.pop();
   source.isBlocked = true;
   assert.equal(await beforeTurn(route, {}, owner), false);
+});
+
+const person = {
+  ...id,
+  imessageEnabled: true,
+  mailbox: { id: "box", emailAddress: "agent@example.com" },
+};
+const known = { id: "contact-1", name: "Alex", memories: ["Prefers email."] };
+function text(contacts) {
+  const event = sms("hello");
+  delete event.companion;
+  if (contacts) event.data.contacts = contacts;
+  return event;
+}
+function mail(contacts, to = ["agent@example.com"]) {
+  return {
+    id: "evt-mail",
+    event_type: "message.received",
+    data: {
+      contacts,
+      message: {
+        id: "mail",
+        direction: "inbound",
+        mailbox_id: "box",
+        thread_id: "mail-thread",
+        from_address: "Alex@Example.com",
+        to_addresses: to,
+        subject: "Plan",
+        body: "hello",
+      },
+    },
+  };
+}
+function imessage(message, extra = {}, contacts) {
+  return {
+    id: "evt-" + message,
+    event_type: "imessage.received",
+    data: {
+      contacts,
+      message: {
+        id: message,
+        direction: "inbound",
+        conversation_id: "chat",
+        sender_number: "+12025550122",
+        content: "hello",
+        ...extra,
+      },
+    },
+  };
+}
+
+test("a known person has one session on every one-to-one channel; the source stays per conversation", () => {
+  const sender = { ...known, bucket: "from", address: "alex@example.com" };
+  const routes = [
+    parseRoute(text([known]), person),
+    parseRoute(
+      mail([
+        { id: "contact-2", bucket: "to", address: "agent@example.com" },
+        sender,
+      ]),
+      person,
+    ),
+    parseRoute(imessage("im", {}, [known]), person),
+  ];
+  for (const route of routes) {
+    assert.equal(route.person, "contact-1");
+    assert.equal(route.thread, digest("contact", "contact-1"));
+    assert.notEqual(route.conversationThread, route.thread);
+    assert.equal(route.eventContact.id, "contact-1");
+    assert.deepEqual(route.memories, ["Prefers email."]);
+    assert.equal(route.noControls, false);
+  }
+  assert.equal(new Set(routes.map((route) => route.source)).size, 3);
+  assert.equal(
+    new Set(routes.map((route) => route.conversationThread)).size,
+    3,
+  );
+  assert.equal(routes[1].subject, "Plan");
+  assert.deepEqual(
+    parseRoute(text([known]), person, [], { contactMemories: false }).memories,
+    [],
+  );
+});
+
+test("unknown senders, groups, Companion scopes and agent tasks keep the conversation's own session", () => {
+  const anonymous = parseRoute(text(), person);
+  assert.equal(anonymous.person, null);
+  assert.equal(anonymous.eventContact, null);
+  assert.equal(anonymous.thread, anonymous.conversationThread);
+  assert.equal(anonymous.thread, anonymous.source);
+  // More than one contact on a text does not say which of them wrote it.
+  assert.equal(
+    parseRoute(text([known, { id: "contact-2" }]), person).person,
+    null,
+  );
+
+  const sender = { ...known, bucket: "from", address: "alex@example.com" };
+  const scoped = sms("hello");
+  scoped.data.contacts = [known];
+  const groups = [
+    parseRoute(
+      mail([sender], ["agent@example.com", "other@example.com"]),
+      person,
+    ),
+    parseRoute(imessage("im", { is_group: true }, [known]), person),
+    parseRoute(scoped, person),
+  ];
+  for (const route of groups) {
+    assert.equal(route.eventContact.id, "contact-1");
+    assert.equal(route.group, true);
+    assert.equal(route.person, null);
+    assert.equal(route.thread, route.conversationThread);
+    assert.notEqual(route.thread, digest("contact", "contact-1"));
+  }
+
+  const task = parseRoute(
+    {
+      id: "evt",
+      event_type: "a2a.task.message",
+      data: {
+        task_id: "task",
+        context_id: "context",
+        message_id: "source",
+        caller: { identity_id: "peer", handle: "peer" },
+        agent_identities: [{ id: "peer", agent_handle: "peer" }],
+        parts: [{ text: "work" }],
+      },
+    },
+    person,
+  );
+  assert.equal(task.person, null);
+  assert.equal(task.thread, task.source);
+  assert.equal(task.noControls, true);
+});
+
+test("a native reply is a distinct source in the same iMessage session", () => {
+  const top = parseRoute(imessage("first"), person);
+  const reply = parseRoute(
+    imessage("second", {
+      thread_root_message_id: "first",
+      reply_to_message_id: "first",
+    }),
+    person,
+  );
+  assert.equal(reply.subthread, "first");
+  assert.equal(top.subthread, "");
+  assert.notEqual(reply.source, top.source);
+  assert.equal(reply.thread, top.thread);
+  assert.equal(reply.conversationThread, top.source);
+});
+
+test("Slack stays per thread, names its contact, and takes no controls under a sender policy", () => {
+  const event = (extra = {}) => ({
+    id: "evt",
+    event_type: "slack.dm_received",
+    data: {
+      identity_id: id.id,
+      connection_id: "conn",
+      workspace_id: "team",
+      actor_id: "peer",
+      message_ts: "900.01",
+      conversation_id: "dm",
+      contact_id: "contact-1",
+      contacts: [known],
+      event: { text: "hello" },
+      ...extra,
+    },
+  });
+  const options = { slackEnabled: true };
+  const route = parseRoute(event(), id, [], options);
+  assert.deepEqual(route.eventContact, { id: "contact-1" });
+  assert.deepEqual(route.memories, []);
+  assert.equal(route.person, null);
+  assert.equal(route.thread, route.source);
+  assert.equal(route.thread, route.conversationThread);
+  assert.equal(route.noControls, false);
+  assert.notEqual(
+    parseRoute(event({ thread_ts: "800.01" }), id, [], options).thread,
+    route.thread,
+  );
+  assert.equal(
+    parseRoute(event(), id, ["team:peer"], options).noControls,
+    true,
+  );
 });

@@ -1,14 +1,12 @@
-import { identityStatus, slackConnectionStatus } from "./identity-status.js";
-import { isToolEnabled } from "../extension/selection.js";
-import { runProjectTest } from "./project-test.js";
+import { identityStatus } from "./identity-status.js";
 import { journalDirectory } from "./journal.js";
 import {
-  createEditApprovals,
-  isEditControl,
-  reservedEditControl,
-  normalizedCommand,
-  admissionDecision,
-} from "./approvals.js";
+  createPermissions,
+  DEFAULT_PERMISSION_TIMEOUT_S,
+  withoutMention,
+} from "./permissions.js";
+import { createContactResolver, describeSender } from "./contacts.js";
+import { stripMarkdown } from "./prompts.js";
 import { DatabaseSync } from "node:sqlite";
 import {
   mkdirSync,
@@ -33,20 +31,19 @@ import { failureCategory } from "./diagnostics.js";
 import { problem } from "../cli/errors.js";
 import { describeDelivery, openDeliveryJournal } from "./delivery-journal.js";
 import { deliveryNotification } from "./delivery.js";
-import { hasProjectGrant, runPiTurn } from "./pi.js";
-
-import {
-  directBinding,
-  projectAudience,
-  openProjectGrants,
-  verifyProjectConversation,
-} from "./project-grants.js";
+import { runPiTurn } from "./pi.js";
 
 const MAX_WAITING = 256;
 const CONCURRENCY = 4;
 const RETRIES = [1_000, 10_000, 60_000, 300_000];
 const COMMANDS = new Set(["/clear", "/new", "/status", "/stop", "/cancel"]);
-const PENDING = "('queued','reply','sending','project','report')";
+const PENDING = "('queued','reply','sending','running','report')";
+const commandText = (route) =>
+  (route.control ?? route.text).trim().toLowerCase();
+// A known person is the same actor on every channel they write from.
+const actorOf = (route) => route.person ?? route.sender;
+// An approval question belongs to the conversation it was asked in.
+const askedIn = (route) => route.conversationThread ?? route.thread;
 
 function flush(path) {
   const fd = openSync(path, "r");
@@ -70,21 +67,9 @@ export function createGatewayRuntime(
     throw problem("Gateway identity and state directory required.");
   const turnConfig = {
     ...config,
+    identityId: identity.id,
     identity: identity.agentHandle || config.identity,
     ...identityStatus(identity, config.slackEnabled, slackConnected),
-    async lookupIdentity() {
-      const current = await client.getIdentity(identity.agentHandle);
-      if (
-        current.id !== identity.id ||
-        current.agentHandle !== identity.agentHandle
-      )
-        throw new Error("Identity changed.");
-      return identityStatus(
-        current,
-        config.slackEnabled,
-        await slackConnectionStatus(client, current.id),
-      );
-    },
   };
   const dir = journalDirectory(config, identity);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -97,7 +82,7 @@ export function createGatewayRuntime(
       "Another gateway owns this identity's state. Stop it before starting another.",
     );
   }
-  let db, projectGrantFor, delivery;
+  let db, delivery;
   try {
     db = new DatabaseSync(join(dir, "inbox.sqlite"));
     chmodSync(join(dir, "inbox.sqlite"), 0o600);
@@ -122,10 +107,9 @@ export function createGatewayRuntime(
       CREATE TABLE IF NOT EXISTS sessions (
         thread TEXT PRIMARY KEY, revision TEXT NOT NULL, actor TEXT, sequence INTEGER
       );
-      UPDATE jobs SET state='uncertain' WHERE state IN ('sending','project')`);
+      UPDATE jobs SET state='uncertain' WHERE state IN ('sending','project','running')`);
     db.exec("BEGIN IMMEDIATE");
     delivery = openDeliveryJournal(db);
-    projectGrantFor = openProjectGrants(db, config);
     db.exec("COMMIT");
   } catch (error) {
     db?.close();
@@ -134,32 +118,8 @@ export function createGatewayRuntime(
   }
 
   const active = new Map();
-  const approvals = createEditApprovals();
-  const dialogs = new Set([approvals]);
-  const decisionFor = (route, text) =>
-    [...dialogs].find((d) => d.matches(route, text));
-  function channelOwner(route) {
-    switch (route.channel) {
-      case "email":
-        return identity.mailbox?.id;
-      case "sms":
-        return (
-          identity.phoneNumber?.number &&
-          digest(identity.phoneNumber.id, identity.phoneNumber.number)
-        );
-      case "slack":
-        return [route.connection, route.workspace, route.generation].join(":");
-      case "imessage":
-        return (
-          identity.imessageNumber?.number ??
-          (route.assignment && "assignment:" + route.assignment)
-        );
-      case "whatsapp":
-        return identity.whatsappNumber;
-      default:
-        return null;
-    }
-  }
+  const permissions = createPermissions();
+  const resolveContact = createContactResolver(client);
   const done = Promise.withResolvers();
   done.promise.catch(() => {});
   let timer,
@@ -230,9 +190,6 @@ export function createGatewayRuntime(
           delivery.defer(event.id, notice.channel, notice.message);
         }
       });
-      if (notice.state === "failed")
-        for (const dialog of dialogs)
-          dialog.failedPrompt(notice.channel, notice.message);
       return "accepted";
     }
     const route =
@@ -241,7 +198,12 @@ export function createGatewayRuntime(
         : parseRoute(event, identity, config.allowedSenders, config);
     if (!route) return "ignored";
     // Distinct subscriptions can deliver a single source message under different event IDs.
-    let id = digest(identity.id, route.channel, route.thread, route.message);
+    let id = digest(
+      identity.id,
+      route.channel,
+      route.source ?? route.thread,
+      route.message,
+    );
     // Older journals used each top-level phone message's own ID as a subthread.
     // Preserve the original receipt if that source is replayed after upgrading.
     if (
@@ -263,15 +225,6 @@ export function createGatewayRuntime(
       );
       if (stateOf.get(legacy)) id = legacy;
     }
-    route.projectGrant = projectGrantFor(route);
-    if (route.projectGrant || route.channel === "a2a")
-      route.thread = digest(
-        route.thread,
-        "project-scope",
-        route.projectGrant,
-        route.assignment,
-        route.channel === "slack" ? route.workspace : channelOwner(route),
-      );
     if (stateOf.get(id)) {
       db.prepare("INSERT INTO receipts(event,job) VALUES(?,?)").run(
         event.id,
@@ -287,12 +240,29 @@ export function createGatewayRuntime(
         .get(route.thread)
     )
       return "ignored";
-    const text = normalizedCommand(route.control ?? route.text);
-    const editControl = reservedEditControl(route, text);
-    const decision =
-      editControl && decisionFor(route, admissionDecision(route, text));
-    if (editControl && !decision) return "ignored";
-    const command = decision ? "/decision" : COMMANDS.has(text) ? text : null;
+    // While an approval question is open, the asker's next message answers it.
+    if (
+      route.channel !== "a2a" &&
+      route.channel !== "external" &&
+      permissions.answer(
+        askedIn(route),
+        route.sender,
+        withoutMention(route.control ?? route.text, identity.agentHandle),
+      ) === "answered"
+    ) {
+      transaction(() => {
+        db.prepare(
+          "INSERT INTO jobs(id,thread,actor,command,state) VALUES(?,?,?,'/permission','done')",
+        ).run(id, route.thread, actorOf(route));
+        db.prepare("INSERT INTO receipts(event,job) VALUES(?,?)").run(
+          event.id,
+          id,
+        );
+      });
+      return "accepted";
+    }
+    const text = commandText(route);
+    const command = COMMANDS.has(text) ? text : null;
     if (
       command &&
       (route.noControls ||
@@ -313,10 +283,8 @@ export function createGatewayRuntime(
         "INSERT INTO jobs(id,thread,actor,sequence,command,payload,state) VALUES(?,?,?,?,?,?,?)",
       ).run(
         id,
-        (decision && decision.controlThread(route)) ||
-          (command && approvals.controlThread(route)) ||
-          route.thread,
-        route.sender,
+        route.thread,
+        actorOf(route),
         route.sequence ?? null,
         command,
         JSON.stringify(route),
@@ -347,9 +315,10 @@ export function createGatewayRuntime(
         `SELECT id,state,actor FROM jobs WHERE thread=? AND rowid<? AND command IS NULL AND state IN ${PENDING}`,
       )
       .all(job.thread, job.rowid);
+    const actor = actorOf(route);
     if (
-      (session && session.actor !== route.sender) ||
-      prior.some((row) => row.actor !== route.sender)
+      (session && session.actor !== actor) ||
+      prior.some((row) => row.actor !== actor)
     ) {
       return "This command cannot change another sender's conversation.";
     }
@@ -357,190 +326,66 @@ export function createGatewayRuntime(
       return prior.length
         ? "Pi has work in progress in this conversation."
         : "Pi is idle in this conversation.";
-    const stoppingProject = prior.some((row) => row.state === "project");
-    if (prior.some((row) => row.state !== "queued" && row.state !== "project"))
+    const stoppingTurn = prior.some((row) => row.state === "running");
+    if (prior.some((row) => row.state !== "queued" && row.state !== "running"))
       return "A reply is already being delivered and cannot be stopped.";
     for (const row of prior) {
-      // A project tool may already have written a file; never replay or
-      // report its effects as rolled back after an abort.
-      mark.run(row.state === "project" ? "uncertain" : "canceled", row.id);
+      // A running turn may already have acted through a tool; never replay
+      // it or report its effects as rolled back after an abort.
+      mark.run(row.state === "running" ? "uncertain" : "canceled", row.id);
       active.get(row.id)?.controller.abort();
     }
     if (job.command === "/clear" || job.command === "/new") {
       delivery.clear(job);
+      permissions.clear(job.thread);
       db.prepare("DELETE FROM sessions WHERE thread=?").run(job.thread);
       return (
         "Conversation cleared. Your next message starts a new session." +
-        (stoppingProject ? " Earlier file edits may remain." : "")
+        (stoppingTurn ? " Work the stopped turn already did may remain." : "")
       );
     }
-    if (stoppingProject)
-      return "Stopping the project turn. Earlier file edits may remain.";
+    if (stoppingTurn) return "Stopped. Work the turn already did may remain.";
     return prior.length ? "Stopped." : "Nothing is running.";
   }
 
-  function grantedRequest(job, route, turnSignal, dialog = approvals) {
-    const owner = channelOwner(route);
-    return async (proposal, hostSignal, remainingMs, mailboxProof = false) => {
-      const signal = hostSignal
-        ? AbortSignal.any([turnSignal, hostSignal])
-        : turnSignal;
-      const recipientAllowed = (target) => {
-        const list = config.outbound?.allowedRecipients ?? [];
-        return list.length
-          ? list.some((s) => s.trim().toLowerCase() === target.toLowerCase())
-          : config.outbound?.approval !== "allowlist";
-      };
-      const allowed = (source) => {
-        if (
-          signal.aborted ||
-          !owner ||
-          owner !== channelOwner(source) ||
-          !source.projectGrant ||
-          source.projectGrant !== projectGrantFor(source) ||
-          !recipientAllowed(projectAudience(source))
-        )
-          return false;
-        if (
-          config.allowedSenders?.length &&
-          !config.allowedSenders.some(
-            (s) => s.trim().toLowerCase() === source.sender.toLowerCase(),
-          )
-        )
-          return false;
-        if (source.channel === "slack" && !config.slackEnabled) return false;
-        if (mailboxProof) return source.channel === "email";
-        switch (proposal?.kind) {
-          case "email":
-            return Boolean(
-              identity.mailbox?.id &&
-                isToolEnabled(
-                  {
-                    name: "inkbox_send_email",
-                    group: "email",
-                    defaultEnabled: true,
-                  },
-                  new Set(config.tools?.enable),
-                  new Set(config.tools?.disable),
-                ) &&
-                recipientAllowed(proposal.recipient),
-            );
-          case "test":
-            return (
-              Array.isArray(config.projectTestCommand) &&
-              JSON.stringify(config.projectTestCommand) ===
-                JSON.stringify(proposal.command)
-            );
-          case "question":
-            return true;
-          default:
-            return config.projectFiles?.includes(proposal?.file);
-        }
-      };
-      const approved = await dialog.request({
-        route,
-        proposal,
-        mailboxProof,
-        signal,
-        remainingMs,
-        async verify(source, expectedCommand) {
-          if (!allowed(source)) return false;
-          const copy = {
-            ...source,
-            allowedRecipients: config.outbound?.allowedRecipients ?? [],
-          };
-          if (
-            !(await verifyProjectConversation(copy, identity, client)) ||
-            !allowed(copy)
-          )
-            return false;
-          return expectedCommand
-            ? normalizedCommand(copy.control ?? copy.text) === expectedCommand
-            : copy.text === source.text;
-        },
-        async send(prompt, code) {
-          const sent = await reply(
-            { ...route, editApprovalPrompt: true },
-            prompt,
-            digest(job.id, "project-dialog", code),
+  // Approval questions go to the conversation the turn is answering. Agent
+  // tasks and sponsored group members have nobody who can approve.
+  function permissionFor(job, route, turnSignal) {
+    if (
+      route.channel === "a2a" ||
+      route.channel === "external" ||
+      route.companion ||
+      route.sponsored
+    )
+      return Object.assign(async () => "reject", { unattended: true });
+    let prompts = 0;
+    return ({ key, summary }, hostSignal) =>
+      permissions.ask({
+        conversation: askedIn(route),
+        session: job.thread,
+        actor: route.sender,
+        mention: Boolean(route.group && route.groupReplyMode === "mention"),
+        key,
+        summary,
+        signal: hostSignal
+          ? AbortSignal.any([turnSignal, hostSignal])
+          : turnSignal,
+        timeoutMs:
+          (config.permissionTimeoutS ?? DEFAULT_PERMISSION_TIMEOUT_S) * 1000,
+        send: (prompt) =>
+          reply(
+            route,
+            // The person must see the request exactly as it will run.
+            boundedReply(route.channel, prompt, { verbatim: true }),
+            digest(job.id, "permission", ++prompts),
             client,
             identity,
-          );
-          if (
-            sent?.id &&
-            !signal.aborted &&
-            db
-              .prepare(
-                "SELECT state FROM notices WHERE channel=? AND message=?",
-              )
-              .get(route.channel, sent.id)?.state === "failed"
-          )
-            throw new Error("The project request could not be delivered.");
-          return sent;
-        },
+          ),
       });
-      if (!approved || !allowed(route)) return false;
-      if (mailboxProof || !proposal.kind || proposal.kind === "question")
-        return approved;
-      if (proposal.kind === "test") return runProjectTest(config, signal);
-      // The SDK retries the same input under one key; a gateway restart never
-      // replays a project turn which may already have changed external state.
-      if (proposal.kind === "email") {
-        try {
-          const sent = await identity.sendEmail({
-            to: [proposal.recipient],
-            subject: proposal.subject,
-            bodyText: proposal.body,
-            idempotencyKey: digest(
-              job.id,
-              "project-email",
-              proposal.recipient,
-              proposal.subject,
-              proposal.body,
-            ),
-          });
-          return sent?.id
-            ? "sent"
-            : "Email submission is unconfirmed. Do not resend automatically.";
-        } catch {
-          return "Email submission was not confirmed. Do not claim success or resend automatically.";
-        }
-      }
-      return false;
-    };
-  }
-
-  async function directProjectTurn(job, route, file, signal) {
-    const ended = new AbortController();
-    try {
-      const request = grantedRequest(
-        job,
-        route,
-        AbortSignal.any([signal, ended.signal]),
-      );
-      return await turn(turnConfig, route, file, signal, request, request);
-    } finally {
-      ended.abort();
-    }
   }
 
   async function processJob(job, signal) {
     const route = JSON.parse(job.payload);
-    if (
-      (job.command &&
-        (job.command === "/decision" || isEditControl(job.command)) &&
-        !decisionFor(
-          route,
-          admissionDecision(
-            route,
-            normalizedCommand(route.control ?? route.text),
-          ),
-        )) ||
-      (route.projectGrant && route.projectGrant !== projectGrantFor(route))
-    ) {
-      mark.run("ignored", job.id);
-      return;
-    }
     // Retries survive service restarts; the current owner's routing policy, not
     // a previous process's saved copy, must authorize delayed work and replies.
     const allowedSenders = config.allowedSenders ?? [];
@@ -567,10 +412,6 @@ export function createGatewayRuntime(
         allowedRecipients.length &&
         !allowedRecipients.includes(route.callerId) &&
         !matches(allowedRecipients, route.sender)) ||
-      (route.projectGrant &&
-        route.channel !== "a2a" &&
-        allowedRecipients.length &&
-        !matches(allowedRecipients, projectAudience(route))) ||
       (job.state === "reply" &&
         route.companion?.activation &&
         changedSenders &&
@@ -586,8 +427,7 @@ export function createGatewayRuntime(
     }
     let answer = job.answer;
     if (job.state === "queued") {
-      let session = getSession.get(job.thread);
-      const admittedCommand = normalizedCommand(route.control ?? route.text);
+      const session = getSession.get(job.thread);
       if (
         (session?.sequence != null &&
           job.sequence != null &&
@@ -614,83 +454,22 @@ export function createGatewayRuntime(
         }
         db.prepare("DELETE FROM media_wait WHERE job=?").run(job.id);
       }
-      if (
-        session &&
-        route.channel === "slack" &&
-        route.projectGrant &&
-        db
-          .prepare(
-            "SELECT generation FROM slack_session_generations WHERE thread=?",
-          )
-          .get(job.thread)?.generation !== route.generation
-      )
-        session = undefined;
-      const sourceCommand = normalizedCommand(route.control ?? route.text);
-      if (
-        job.command === "/decision" &&
-        admissionDecision(route, sourceCommand) !==
-          admissionDecision(route, admittedCommand)
-      ) {
+      // Only reading the source back can show that a text is a group message.
+      // A group never shares the sender's one-to-one session.
+      if (route.group && route.person) {
+        route.person = null;
+        route.memories = [];
+        route.thread = route.conversationThread;
+        db.prepare(
+          "UPDATE jobs SET thread=?, actor=?, payload=? WHERE id=?",
+        ).run(route.thread, route.sender, JSON.stringify(route), job.id);
+        return;
+      }
+      if (job.command && route.noControls) {
         mark.run("ignored", job.id);
         return;
-      }
-      if (
-        job.command &&
-        (route.noControls ||
-          (route.projectGrant &&
-            job.command !== "/decision" &&
-            job.command !== sourceCommand))
-      ) {
-        mark.run("ignored", job.id);
-        return;
-      }
-      if (
-        reservedEditControl(route, sourceCommand) ||
-        job.command === "/decision" ||
-        (job.command && isEditControl(job.command))
-      ) {
-        // beforeTurn authenticated the incoming control from Inkbox, including
-        // its body. Never reinterpret a stale or mismatched control as a turn.
-        const handled =
-          job.command &&
-          (job.command === "/decision" || isEditControl(job.command)) &&
-          route.projectGrant &&
-          decisionFor(route, sourceCommand)?.consume(route, sourceCommand);
-        mark.run(handled ? "done" : "ignored", job.id);
-        return;
-      }
-      if (route.channel === "email" && route.projectGrant) {
-        // The incoming From header is not evidence of mailbox control. Confirm
-        // the original request before exposing a transcript, running Pi or
-        // changing its state. No project contents are sent in this challenge.
-        const proof = createEditApprovals();
-        dialogs.add(proof);
-        try {
-          if (
-            !(await grantedRequest(job, route, signal, proof)(
-              null,
-              null,
-              undefined,
-              true,
-            ))
-          ) {
-            if (!signal.aborted) mark.run("ignored", job.id);
-            return;
-          }
-        } finally {
-          dialogs.delete(proof);
-        }
       }
       if (job.command) {
-        // The SDK has now verified the control body and native subthread. An
-        // expired alias cannot target newer work in the original conversation.
-        if (
-          job.thread !== route.thread &&
-          approvals.controlThread(route) !== job.thread
-        ) {
-          mark.run("ignored", job.id);
-          return;
-        }
         transaction(() => {
           answer = applyControl(job, route);
           saveAnswer.run(answer, JSON.stringify(route), job.id);
@@ -698,44 +477,49 @@ export function createGatewayRuntime(
         if (session && !getSession.get(job.thread))
           rmSync(pathFor(session.revision), { force: true });
       } else {
+        route.contact = await describeSender(route, resolveContact);
+        if (signal.aborted) return;
+        if (route.group) route.memories = [];
         const notes = delivery.unread(job);
         route.deliveryContext = describeDelivery(notes);
         const file = pathFor(job.id);
         // A crash mid-turn never becomes the starting point for a retry.
         if (session) copyFileSync(pathFor(session.revision), file);
         else rmSync(file, { force: true });
-        // These turns can already have changed a file if Pi dies. Never replay
-        // them from the pre-turn transcript after an interrupted process.
-        if (hasProjectGrant(config, route))
-          db.prepare("UPDATE jobs SET state='project' WHERE id=?").run(job.id);
-        answer =
-          route.projectGrant && directBinding(route) && !route.noControls
-            ? await directProjectTurn(job, route, file, signal)
-            : await turn(turnConfig, route, file, signal);
+        // A turn can act through its tools before Pi exits. Never replay it
+        // from the pre-turn transcript after an interrupted process.
+        if (
+          route.channel !== "external" &&
+          !db
+            .prepare(
+              "UPDATE jobs SET state='running' WHERE id=? AND state='queued'",
+            )
+            .run(job.id).changes
+        )
+          return;
+        answer = await turn(
+          turnConfig,
+          route,
+          file,
+          signal,
+          permissionFor(job, route, signal),
+        );
         if (signal.aborted) return;
         if (route.channel === "a2a") parseA2AOutcome(answer);
         flush(file);
         flush(dir);
         transaction(() => {
-          if (route.channel === "slack" && route.projectGrant)
-            db.prepare(
-              "INSERT OR REPLACE INTO slack_session_generations VALUES(?,?)",
-            ).run(job.thread, route.generation);
           delivery.seen(notes);
           delete route.deliveryContext;
-          const actor =
-            !session || session.actor === route.sender ? route.sender : null;
+          delete route.contact;
+          const who = actorOf(route);
+          const actor = !session || session.actor === who ? who : null;
           db.prepare(
             "INSERT OR REPLACE INTO sessions(thread,revision,actor,sequence) VALUES(?,?,?,?)",
           ).run(route.thread, job.id, actor, job.sequence);
           saveAnswer.run(answer, JSON.stringify(route), job.id);
         });
         if (session) rmSync(pathFor(session.revision), { force: true });
-        const worker = active.get(job.id);
-        if (worker?.projectTurn) {
-          worker.projectTurn = false;
-          schedule();
-        }
       }
     }
     if (closed || signal.aborted) return;
@@ -744,16 +528,6 @@ export function createGatewayRuntime(
       db.prepare("UPDATE jobs SET state='done', payload=NULL WHERE id=?").run(
         job.id,
       );
-      return;
-    }
-    if (
-      route.projectGrant &&
-      (projectGrantFor(route) !== route.projectGrant ||
-        (reply !== sendReply &&
-          route.channel !== "a2a" &&
-          !(await verifyProjectConversation(route, identity, client))))
-    ) {
-      mark.run("ignored", job.id);
       return;
     }
     let result;
@@ -765,7 +539,13 @@ export function createGatewayRuntime(
       try {
         result = await reply(
           route,
-          boundedReply(route.channel, answer),
+          boundedReply(
+            route.channel,
+            !job.command &&
+              ["sms", "imessage", "whatsapp"].includes(route.channel)
+              ? stripMarkdown(answer)
+              : answer,
+          ),
           job.id,
           client,
           identity,
@@ -800,26 +580,53 @@ export function createGatewayRuntime(
     });
   }
 
-  function recordFailure(id, attempt, category) {
+  function recordFailure(id, attempt, category, detail) {
     db.prepare(
       "INSERT OR REPLACE INTO diagnostics(job, attempt, category) VALUES(?,?,?)",
     ).run(id, attempt, category);
-    logger.error("Inkbox Pi job failed:", id, "attempt", attempt, category);
+    logger.error(
+      "Inkbox Pi job failed:",
+      id,
+      "attempt",
+      attempt,
+      category,
+      ...(detail ? [detail] : []),
+    );
   }
 
   function retry(job, signal, error) {
     if (signal.aborted) return;
-    const { attempts, state } = db
+    const row = db
       .prepare("SELECT attempts,state FROM jobs WHERE id=?")
       .get(job.id);
+    const { attempts } = row;
+    let { state } = row;
+    // Pi never accepted the prompt, so nothing can have run: retry as queued.
+    if (state === "running" && error?.started === false) {
+      db.prepare("UPDATE jobs SET state='queued' WHERE id=?").run(job.id);
+      state = "queued";
+    }
     const category = failureCategory(
       error,
       state === "reply" ? "reply-delivery" : "event-processing",
     );
-    recordFailure(job.id, attempts + 1, category);
-    if (state === "project") {
-      db.prepare("UPDATE jobs SET state='uncertain' WHERE id=?").run(job.id);
-      logger.error("Inkbox Pi project turn was interrupted:", job.id);
+    recordFailure(job.id, attempts + 1, category, error?.detail);
+    if (state === "running") {
+      if (JSON.parse(job.payload).channel === "a2a") {
+        // Report the unsuccessful turn to the caller; task ownership and
+        // current state are checked again before this transition is sent.
+        saveAnswer.run(
+          JSON.stringify({
+            intent: "fail",
+            text: "Pi could not complete this task.",
+          }),
+          job.payload,
+          job.id,
+        );
+        return;
+      }
+      db.prepare("UPDATE jobs SET state='failed' WHERE id=?").run(job.id);
+      logger.error("Inkbox Pi turn did not finish and was not rerun:", job.id);
       return;
     }
     const status = error?.statusCode;
@@ -861,7 +668,7 @@ export function createGatewayRuntime(
   // has a dedicated lane per thread; when two controls race they run in order.
   const ready =
     db.prepare(`SELECT j.rowid,j.* FROM jobs j WHERE j.state IN ('queued','reply','report') AND j.due<=?
-    AND (j.command='/decision' OR NOT EXISTS(SELECT 1 FROM jobs earlier WHERE earlier.thread=j.thread AND earlier.state IN ${PENDING}
+    AND (NOT EXISTS(SELECT 1 FROM jobs earlier WHERE earlier.thread=j.thread AND earlier.state IN ${PENDING}
       AND ((j.command IS NOT NULL AND earlier.command IS NOT NULL AND earlier.rowid<j.rowid) OR
        (j.command IS NULL AND (earlier.command IS NOT NULL AND earlier.rowid<j.rowid OR
         earlier.command IS NULL AND (CASE WHEN j.sequence IS NOT NULL AND earlier.sequence IS NOT NULL AND j.sequence!=earlier.sequence
@@ -879,29 +686,16 @@ export function createGatewayRuntime(
       for (const job of ready.all(Date.now())) {
         if (active.has(job.id)) continue;
         const workers = [...active.values()];
-        const decision = job.command === "/decision";
         if (
-          workers.length >= CONCURRENCY + (decision ? 2 : 1) ||
+          workers.length >= CONCURRENCY + 1 ||
           (!job.command && workers.length >= CONCURRENCY)
         )
           continue;
         if (
           workers.some(
-            (w) =>
-              w.thread === job.thread &&
-              (decision
-                ? w.command === "/decision"
-                : !job.command || w.command),
+            (w) => w.thread === job.thread && (!job.command || w.command),
           )
         )
-          continue;
-        // All project grants in this runtime name the same owner-selected files.
-        // Serialize just their model turns, not ordinary conversations or deliveries.
-        const projectTurn =
-          job.state === "queued" &&
-          !job.command &&
-          Boolean(JSON.parse(job.payload).projectGrant);
-        if (projectTurn && workers.some((worker) => worker.projectTurn))
           continue;
         const controller = new AbortController();
         const promise = processJob(job, controller.signal)
@@ -914,7 +708,6 @@ export function createGatewayRuntime(
         active.set(job.id, {
           thread: job.thread,
           command: job.command,
-          projectTurn,
           controller,
           promise,
         });

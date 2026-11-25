@@ -13,13 +13,14 @@ export interface GatewayConfig {
   allowedSenders?: string[];
   tools?: { enable?: string[]; disable?: string[] };
   outbound?: { approval?: "ask" | "allowlist" | "auto"; allowedRecipients?: string[] };
-  trustedAgentIds?: string[];
-  trustedConversations?: string[];
-  projectFiles?: string[];
-  /** Allow the configured direct conversations to inspect this workspace. */
-  projectReadWorkspace?: boolean;
-  /** Owner-selected test executable and arguments; never a chat-supplied shell command. */
-  projectTestCommand?: string[];
+  /** Account key the turn's Inkbox tools act with. */
+  apiKey?: string;
+  /** Pi tools that run without asking the conversation. Default: read, grep, find, ls. */
+  autoAllowedTools?: string[];
+  /** How long an approval question waits for an answer. Default: 600. */
+  permissionTimeoutS?: number;
+  /** Include the sender's Inkbox contact memories in the turn. Default: true. */
+  contactMemories?: boolean;
 }
 
 export interface ListenerConfig extends GatewayConfig {
@@ -39,7 +40,7 @@ export interface VerifiedEvent {
 }
 
 export type EventState =
-  | "unknown" | "queued" | "project" | "reply" | "report" | "sending"
+  | "unknown" | "queued" | "running" | "reply" | "report" | "sending"
   | "done" | "ignored" | "failed" | "uncertain" | "canceled";
 
 export interface GatewayRuntime {

@@ -8,6 +8,7 @@ export function createInkboxRuntime(config: {
   apiKey?: string;
   baseUrl?: string;
   identity?: string;
+  expectedIdentityId?: string;
 }) {
   let client: Inkbox | undefined;
   function getClient() {
@@ -15,19 +16,30 @@ export function createInkboxRuntime(config: {
       throw new Error("Run inkbox-pi setup first.");
     if (!client) {
       const version = createRequire(import.meta.url)("../package.json").version;
-      client = createClient(config.apiKey, config.baseUrl, "inkbox-pi/" + version);
+      client = createClient(
+        config.apiKey,
+        config.baseUrl,
+        "inkbox-pi/" + version,
+      );
     }
     return client;
   }
   let verified: Promise<AgentIdentity> | undefined;
   function getIdentity(): Promise<AgentIdentity> {
     if (!verified) {
-      verified = verifiedIdentity(getClient(), config.identity).catch(
-        (error: unknown) => {
+      verified = verifiedIdentity(getClient(), config.identity)
+        .then((identity) => {
+          if (
+            config.expectedIdentityId &&
+            config.expectedIdentityId !== identity.id
+          )
+            throw new Error("The gateway identity changed.");
+          return identity;
+        })
+        .catch((error: unknown) => {
           verified = undefined;
           throw error;
-        },
-      );
+        });
     }
     return verified!;
   }

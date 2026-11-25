@@ -1,100 +1,28 @@
-// Exact, single-line change shown to the owner. Bidi controls, newlines and
-// invisible Unicode must not be able to rearrange the surrounding instructions.
-const PROPOSAL_LIMIT = 1200;
-export const IDENTITY_LOOKUP_TITLE = "Inkbox identity lookup";
-export const PROJECT_ACTION_TITLE = "Inkbox project action";
-export const PROJECT_EDIT_TITLE = "Inkbox project edit";
+export const PERMISSION_TITLE = "Inkbox permission";
+const SUMMARY_LIMIT = 1200;
 
-export function encodeEditProposal(proposal) {
-  if (
-    !proposal ||
-    typeof proposal !== "object" ||
-    Object.keys(proposal).length !== 3
-  )
-    throw new Error("Invalid edit proposal.");
-  const { file, oldText, newText } = proposal;
-  const fields = [file, oldText, newText];
-  if (
-    !file ||
-    !oldText ||
-    fields.some(
-      (s) => typeof s !== "string" || !s.isWellFormed() || s.includes("\0"),
+// Shown to a person in a chat: keep line breaks, drop control and
+// direction-override characters that could rearrange the surrounding text.
+const printable = (text) =>
+  text
+    .replace(
+      /[\u0000-\u0009\u000b-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g,
+      " ",
     )
-  )
-    throw new Error("Invalid edit proposal.");
-  if (fields.some((s) => s.length > PROPOSAL_LIMIT))
-    throw new Error("Change is too long to review in one message.");
-  return encode({ file, oldText, newText });
+    .trim();
+
+export function permissionRequest(key, summary) {
+  return JSON.stringify({ key, summary });
 }
 
-function encode(value) {
-  const encoded = JSON.stringify(value).replace(
-    /[^\x20-\x7e]|[*_~`<>]/g,
-    (ch) => "\\u" + ch.charCodeAt(0).toString(16).padStart(4, "0"),
-  );
-  if (encoded.length > PROPOSAL_LIMIT)
-    throw new Error("Change is too long to review in one message.");
-  return encoded;
-}
-
-export function encodeProjectAction(request) {
-  const kind = request?.kind;
-  const fields = {
-    test: ["command"],
-    question: ["question"],
-    email: ["recipient", "subject", "body"],
-  }[kind];
-  if (
-    !Array.isArray(fields) ||
-    Object.keys(request).length !== fields.length + 1
-  )
-    throw new Error("Invalid project action.");
-  const value = { kind };
-  for (const key of fields) {
-    const items = key === "command" ? request[key] : [request[key]];
-    if (
-      !Array.isArray(items) ||
-      !items.length ||
-      items.length > 64 ||
-      items.some(
-        (s) =>
-          typeof s !== "string" ||
-          !s.isWellFormed() ||
-          s.length > PROPOSAL_LIMIT ||
-          s.includes("\0"),
-      )
-    )
-      throw new Error("Invalid project action.");
-    value[key] = request[key];
-  }
-  if (
-    (kind === "test" && !value.command[0].trim()) ||
-    (kind === "question" && !value.question.trim()) ||
-    (kind === "email" &&
-      (!value.body.trim() ||
-        !value.subject.trim() ||
-        /[\r\n]/.test(value.subject) ||
-        !/^[^\s@,;<>]+@[^\s@,;<>]+$/.test(value.recipient)))
-  )
-    throw new Error("Invalid project action.");
-  return encode(value);
-}
-
-// Only this package's granted-file extension is loaded in this child. Do not
-// translate arbitrary Pi dialogs (or model text) into requests on the channel.
-export function createEditRpc(
-  stdin,
-  files,
-  confirmEdit,
-  signal,
-  projectAction,
-  command,
-  lookupIdentity,
-) {
+/**
+ * Drives one Pi turn over RPC. The only dialog forwarded out of the process is
+ * this package's own permission question; any other dialog is cancelled.
+ */
+export function createTurnRpc(stdin, signal, askPermission) {
   const promptId = "inkbox-turn";
   let accepted = false;
   let settled = false;
-  let pending = false;
 
   function send(record) {
     if (!signal.aborted && stdin.writable && !stdin.writableEnded)
@@ -102,57 +30,44 @@ export function createEditRpc(
   }
   async function handleDialog(event) {
     const response = { type: "extension_ui_response", id: event.id };
-    const edit =
-      event.method === "confirm" &&
-      event.title === PROJECT_EDIT_TITLE &&
-      confirmEdit;
-    const action =
-      event.method === "input" &&
-      event.title === PROJECT_ACTION_TITLE &&
-      projectAction;
-    const lookup =
-      event.method === "input" &&
-      event.title === IDENTITY_LOOKUP_TITLE &&
-      lookupIdentity;
-    if (pending || (!edit && !action && !lookup))
+    if (
+      event.method !== "input" ||
+      event.title !== PERMISSION_TITLE ||
+      !askPermission
+    )
       return send({ ...response, cancelled: true });
-    pending = true;
     try {
-      if (lookup)
-        return send({
-          ...response,
-          value: JSON.stringify(await lookupIdentity()),
-        });
-      const encoded = edit ? event.message : event.placeholder;
-      if (typeof encoded !== "string" || encoded.length > PROPOSAL_LIMIT)
-        throw new Error("Invalid proposal.");
-      const proposal = JSON.parse(encoded);
-      if (edit) {
-        if (
-          encoded !== encodeEditProposal(proposal) ||
-          !files.includes(proposal.file)
-        )
-          throw new Error("Invalid edit.");
-        send({
-          ...response,
-          confirmed: (await confirmEdit(proposal, signal)) === true,
-        });
-      } else {
-        if (
-          encoded !== encodeProjectAction(proposal) ||
-          (proposal.kind === "test" &&
-            JSON.stringify(proposal.command) !== JSON.stringify(command))
-        )
-          throw new Error("Invalid project action.");
-        const value = await projectAction(proposal, signal);
-        if (typeof value !== "string" || !value || value.length > 12_000)
-          throw new Error("No result.");
-        send({ ...response, value });
-      }
+      const request = JSON.parse(event.placeholder);
+      const summary =
+        typeof request?.summary === "string" ? printable(request.summary) : "";
+      if (typeof request?.key !== "string" || !request.key || !summary)
+        throw new Error("Invalid permission request.");
+      // Say so when the person cannot see everything they would approve.
+      const hidden = summary.length - SUMMARY_LIMIT;
+      const answer = await askPermission(
+        {
+          key: request.key.slice(0, 500),
+          summary:
+            hidden > 0
+              ? summary.slice(0, SUMMARY_LIMIT) +
+                "… [" +
+                hidden +
+                " more characters not shown]"
+              : summary,
+        },
+        signal,
+      );
+      send({
+        ...response,
+        value:
+          answer === "once" || answer === "always"
+            ? "allow"
+            : answer === "timeout"
+              ? "timeout"
+              : "deny",
+      });
     } catch {
       send({ ...response, cancelled: true });
-    } finally {
-      pending = false;
     }
   }
   return {
@@ -173,12 +88,20 @@ export function createEditRpc(
         event.command === "prompt"
       ) {
         if (!event.success || event.data?.disposition !== "started")
-          throw new Error("Pi did not start the requested turn.");
+          throw Object.assign(
+            new Error("Pi did not start the requested turn."),
+            {
+              piError: typeof event.error === "string" ? event.error : "",
+            },
+          );
         accepted = true;
       } else if (event.type === "agent_settled") {
         settled = true;
       }
       if (accepted && settled && !stdin.writableEnded) stdin.end();
+    },
+    started() {
+      return accepted;
     },
     completed() {
       return accepted && settled;

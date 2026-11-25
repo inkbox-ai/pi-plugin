@@ -22,21 +22,6 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
-      - name: Enable the isolated Linux project-test runner
-        run: |
-          sudo apt-get -qq update
-          sudo apt-get install -y bubblewrap
-          if ! bwrap --unshare-all --ro-bind / / -- /usr/bin/true; then
-            # Permit this executable, not every runner process, to create user namespaces.
-            sudo apparmor_parser --replace <<'PROFILE'
-          abi <abi/4.0>,
-          include <tunables/global>
-          profile bwrap /usr/bin/bwrap flags=(unconfined) {
-            userns,
-          }
-          PROFILE
-            bwrap --unshare-all --ro-bind / / -- /usr/bin/true
-          fi
       - run: npm ci
       - run: npm test
       - name: Load the published package layout in Pi
@@ -44,29 +29,3 @@ jobs:
       - name: Validate npm release without publishing
         run: ./publish.sh
       - run: npm run typecheck
-  macos-project-runner:
-    runs-on: macos-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "24"
-      - run: node --test test/project-test-runner.test.js
-      - name: Diagnose a failed macOS sandbox fixture
-        if: failure()
-        run: |
-          sudo /usr/bin/log show --last 2m --style compact --info \
-            --predicate 'eventMessage BEGINSWITH "Sandbox: node(" OR eventMessage BEGINSWITH "Sandbox: sandbox-exec("' | tail -80
-          python3 - <<'PYTHON'
-          import json, pathlib
-          paths = list((pathlib.Path.home() / "Library/Logs/DiagnosticReports").glob("node*.ips"))
-          for path in sorted(paths)[-2:]:
-              text = path.read_text()
-              if "\n" not in text: continue
-              try: crash = json.loads(text.split("\n", 1)[1])
-              except ValueError: continue
-              print(path.name, crash.get("exception"), crash.get("termination"), crash.get("asi"))
-          PYTHON

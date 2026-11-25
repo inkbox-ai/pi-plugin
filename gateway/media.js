@@ -92,7 +92,7 @@ export function refreshMedia(route, rawItems) {
 }
 
 export const waitsForTranscript = (route) =>
-  !route.projectGrant && route.media?.some((item) => item.status === "pending");
+  route.media?.some((item) => item.status === "pending");
 export function transcriptSource(route) {
   if (!channels.has(route.channel) || !route.media?.length) return null;
   const key = route.channel === "slack" ? route.archivedMessage : route.message;

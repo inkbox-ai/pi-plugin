@@ -163,54 +163,127 @@ test("login services resolve the real executable behind a transient shell PATH",
   );
 });
 
-test("direct project bindings, discovery and test argv are validated and scoped to the selected identity", (t) => {
+test("contact memories, the approval timeout and auto-allowed tools load from the profile and environment", (t) => {
   const dir = home(t);
   const env = { HOME: dir, INKBOX_PI_HOME: dir };
-  const bindings = [
-    "email:thread:me@example.test",
-    "sms:conversation:+12025550100",
-    "slack:connection:DROOM:TWORK:UOWNER",
-  ];
-  const argv = ["npm", "test", "--", "argument with spaces"];
-  const project = {
-    trustedConversations: bindings,
-    projectReadWorkspace: true,
-    projectTestCommand: argv,
-  };
-  saveProfile(dir, { identity: "owner", ...project });
-  const loaded = loadConfig(env);
-  for (const [key, value] of Object.entries(project))
-    assert.deepEqual(loaded[key], value);
-  const other = loadConfig({ ...env, INKBOX_IDENTITY: "other" });
-  assert.deepEqual(other.trustedConversations, []);
-  assert.deepEqual(other.projectTestCommand, []);
-  assert.equal(other.projectReadWorkspace, false);
+  saveProfile(dir, { identity: "owner" });
+  const defaults = loadConfig(env);
+  assert.equal(defaults.contactMemories, true);
+  assert.equal(defaults.permissionTimeoutS, 600);
+  // Undefined selects the gateway's own read-only default list.
+  assert.equal(defaults.autoAllowedTools, undefined);
+
+  saveProfile(dir, {
+    identity: "owner",
+    contactMemories: false,
+    permissionTimeoutS: 120,
+    autoAllowedTools: ["read", "bash"],
+  });
+  const saved = loadConfig(env);
+  assert.equal(saved.contactMemories, false);
+  assert.equal(saved.permissionTimeoutS, 120);
+  assert.deepEqual(saved.autoAllowedTools, ["read", "bash"]);
+
   const fromEnv = loadConfig({
     ...env,
-    INKBOX_PI_PROJECT_READ_WORKSPACE: "false",
-    INKBOX_PI_PROJECT_TEST_COMMAND: JSON.stringify(["node", "--test"]),
-    INKBOX_PI_TRUSTED_CONVERSATIONS: bindings.join(","),
+    INKBOX_CONTACT_MEMORIES_ENABLED: "true",
+    INKBOX_PERMISSION_TIMEOUT_S: "30",
+    INKBOX_PI_AUTO_ALLOWED_TOOLS: " read, grep ,,ls ",
   });
-  assert.equal(fromEnv.projectReadWorkspace, false);
-  assert.deepEqual(fromEnv.projectTestCommand, ["node", "--test"]);
-  for (const bad of ["npm test", "null", "{}", "[42]", '[""]']) {
+  assert.equal(fromEnv.contactMemories, true);
+  assert.equal(fromEnv.permissionTimeoutS, 30);
+  assert.deepEqual(fromEnv.autoAllowedTools, ["read", "grep", "ls"]);
+  // An empty list is a choice: every Pi tool asks first.
+  assert.deepEqual(
+    loadConfig({ ...env, INKBOX_PI_AUTO_ALLOWED_TOOLS: "" }).autoAllowedTools,
+    [],
+  );
+
+  for (const bad of ["9", "1501", "1.5", "soon"])
     assert.throws(
-      () => loadConfig({ ...env, INKBOX_PI_PROJECT_TEST_COMMAND: bad }),
-      /argument array/,
+      () => loadConfig({ ...env, INKBOX_PERMISSION_TIMEOUT_S: bad }),
+      /permissionTimeoutS/,
     );
-  }
-  for (const bad of [
-    "email:thread:someone",
-    "sms:room:local-number",
-    "slack:conn:CCHANNEL:TEAM:USER",
-  ]) {
-    assert.throws(
-      () => loadConfig({ ...env, INKBOX_PI_TRUSTED_CONVERSATIONS: bad }),
-      /binding/,
+  for (const edge of ["10", "1500"])
+    assert.equal(
+      loadConfig({ ...env, INKBOX_PERMISSION_TIMEOUT_S: edge })
+        .permissionTimeoutS,
+      Number(edge),
     );
-  }
   assert.throws(
-    () => loadConfig({ ...env, INKBOX_PI_PROJECT_READ_WORKSPACE: "yes" }),
+    () => loadConfig({ ...env, INKBOX_CONTACT_MEMORIES_ENABLED: "yes" }),
     /true or false/,
   );
+  saveProfile(dir, { identity: "owner", autoAllowedTools: "read" });
+  assert.throws(() => loadConfig(env), /list of strings/);
+});
+
+test("contact memories are on unless turned off, also without a saved profile for the identity", (t) => {
+  const dir = home(t);
+  const env = { HOME: dir, INKBOX_PI_HOME: dir };
+  assert.equal(loadConfig(env).contactMemories, true);
+  assert.equal(
+    loadConfig({ ...env, INKBOX_CONTACT_MEMORIES_ENABLED: "false" })
+      .contactMemories,
+    false,
+  );
+  saveProfile(dir, { identity: "owner", contactMemories: false });
+  assert.equal(loadConfig(env).contactMemories, false);
+  assert.equal(
+    loadConfig({ ...env, INKBOX_IDENTITY: "other" }).contactMemories,
+    true,
+  );
+});
+
+test("a saved approval timeout and tool list belong to the identity they were saved for", (t) => {
+  const dir = home(t);
+  const env = { HOME: dir, INKBOX_PI_HOME: dir };
+  saveProfile(dir, {
+    identity: "owner",
+    permissionTimeoutS: 120,
+    autoAllowedTools: ["read", "bash"],
+  });
+  assert.equal(loadConfig(env).permissionTimeoutS, 120);
+  const other = loadConfig({ ...env, INKBOX_IDENTITY: "other" });
+  assert.equal(other.permissionTimeoutS, 600);
+  // Not an empty list: the other identity gets the default read-only tools.
+  assert.equal(other.autoAllowedTools, undefined);
+  assert.deepEqual(
+    loadConfig({
+      ...env,
+      INKBOX_IDENTITY: "other",
+      INKBOX_PI_AUTO_ALLOWED_TOOLS: "ls",
+    }).autoAllowedTools,
+    ["ls"],
+  );
+});
+
+test("settings of the removed file-grant model are ignored, not loaded or validated", (t) => {
+  const dir = home(t);
+  saveProfile(dir, {
+    identity: "owner",
+    trustedConversations: ["not-a-binding"],
+    toolConversations: ["not-a-binding"],
+    trustedAgentIds: ["peer"],
+    projectFiles: ["notes.md"],
+    projectReadWorkspace: "yes",
+    projectTestCommand: "npm test",
+  });
+  const config = loadConfig({
+    HOME: dir,
+    INKBOX_PI_HOME: dir,
+    INKBOX_PI_TRUSTED_CONVERSATIONS: "not-a-binding",
+    INKBOX_PI_PROJECT_TEST_COMMAND: "npm test",
+    INKBOX_PI_PROJECT_READ_WORKSPACE: "yes",
+  });
+  assert.equal(config.identity, "owner");
+  for (const key of [
+    "trustedConversations",
+    "toolConversations",
+    "trustedAgentIds",
+    "projectFiles",
+    "projectReadWorkspace",
+    "projectTestCommand",
+  ])
+    assert.ok(!(key in config), key);
 });

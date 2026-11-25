@@ -43,6 +43,7 @@ export async function approveOutbound(
         ...targets,
         ...(request.metadata ? [JSON.stringify(request.metadata)] : []),
       ].join("\n"),
+      targets,
     ))
   )
     throw new Error("Outbound action was not approved.");

@@ -1,11 +1,6 @@
 import { archivedSlackSource, findTextConversation } from "./source-lookups.js";
-import {
-  directBinding,
-  mailControl,
-  phoneSubthread,
-  samePhoneThread,
-  verifyProjectConversation,
-} from "./project-grants.js";
+import { mailControl, phoneSubthread, samePhoneThread } from "./threads.js";
+import { eventPeople } from "./contacts.js";
 import {
   attachments,
   describeMedia,
@@ -69,6 +64,9 @@ export function parseRoute(event, identity, allowedSenders = [], options = {}) {
     recipients,
     control,
     media = [],
+    subject,
+    rfcMessageId,
+    senderProfile,
     caption;
   if (
     event.companion != null &&
@@ -99,6 +97,19 @@ export function parseRoute(event, identity, allowedSenders = [], options = {}) {
         : workspace) +
       ":" +
       actor;
+    if (profile?.id === actor) {
+      const about = profile.profile ?? {};
+      const fields = {
+        display_name: clean(about.display_name) || clean(profile.name),
+        real_name: clean(about.real_name) || clean(profile.real_name),
+        email: clean(about.email),
+        title: clean(about.title),
+      };
+      const known = Object.entries(fields)
+        .filter(([, value]) => value)
+        .map(([key, value]) => [key, value.slice(0, 200)]);
+      if (known.length) senderProfile = Object.fromEntries(known);
+    }
     generation = data.connection_generation;
     archivedMessage = clean(data.message_id);
     if (
@@ -179,6 +190,8 @@ export function parseRoute(event, identity, allowedSenders = [], options = {}) {
         if (!identity.mailbox || record.mailbox_id !== identity.mailbox.id)
           return null;
         channel = "email";
+        subject = clean(record.subject);
+        rfcMessageId = clean(record.message_id);
         sender = normalized(record.from_address);
         conversation = clean(record.thread_id) || message;
         text =
@@ -289,9 +302,16 @@ export function parseRoute(event, identity, allowedSenders = [], options = {}) {
     )
   )
     return null;
+  const people = eventPeople(event, channel, sender);
   const route = {
     media,
     caption,
+    subject,
+    rfcMessageId,
+    senderProfile,
+    eventContact: people.contact,
+    eventAgent: people.agent,
+    memories: options.contactMemories === false ? [] : people.memories,
     callerId,
     contextId,
     channel,
@@ -343,14 +363,7 @@ export function parseRoute(event, identity, allowedSenders = [], options = {}) {
     route.group ||
     Boolean(route.companion) ||
     route.channel === "a2a" ||
-    (channel === "slack" &&
-      allowedSenders.length > 0 &&
-      !(
-        options.trustedConversations?.includes(directBinding(route)) &&
-        (options.projectFiles?.length ||
-          options.projectReadWorkspace ||
-          options.projectTestCommand?.length)
-      ));
+    (channel === "slack" && allowedSenders.length > 0);
   if (
     route.group &&
     route.channel !== "sms" &&
@@ -361,7 +374,8 @@ export function parseRoute(event, identity, allowedSenders = [], options = {}) {
         !mentionsAgent(caption ?? "", identity.agentHandle)))
   )
     return null;
-  route.thread = route.companion
+  // Identifies the source message; unlike the session key it never changes.
+  route.source = route.companion
     ? digest(
         channel,
         connection,
@@ -370,6 +384,22 @@ export function parseRoute(event, identity, allowedSenders = [], options = {}) {
         route.companion.activation,
       )
     : digest(channel, connection, conversation, subthread || null);
+  route.conversationThread =
+    route.companion || channel === "slack"
+      ? route.source
+      : digest(channel, connection, conversation, null);
+  // A known person has one session across email and the phone channels.
+  // Groups, Slack threads and agent tasks stay with their own conversation.
+  route.person =
+    !route.group &&
+    !route.companion &&
+    ["email", "sms", "imessage", "whatsapp"].includes(channel) &&
+    people.contact?.id
+      ? people.contact.id
+      : null;
+  route.thread = route.person
+    ? digest("contact", route.person)
+    : route.conversationThread;
   return route;
 }
 
@@ -645,13 +675,10 @@ export async function beforeTurn(
   { hasSession = false } = {},
 ) {
   if (route.channel === "a2a") return taskSource(route, identity);
-  if (route.projectGrant) {
-    if (!(await verifyProjectConversation(route, identity, client)))
-      return false;
-  } else if (route.channel === "slack") {
+  if (route.channel === "slack") {
     if (!(await slackSource(route, client, identity))) return false;
   } else if (!(await messagingSource(route, identity))) return false;
-  if (route.media?.length && !route.projectGrant) {
+  if (route.media?.length) {
     route.text = [route.caption, describeMedia(route.media)]
       .filter(Boolean)
       .join("\n");
@@ -664,26 +691,12 @@ export async function sendReply(route, text, idempotencyKey, client, identity) {
     throw new Error("Companion reply scope has changed.");
   if (
     route.channel !== "a2a" &&
-    (route.projectGrant
-      ? !(await verifyProjectConversation(route, identity, client))
-      : route.channel !== "slack" && !(await messagingSource(route, identity)))
+    route.channel !== "slack" &&
+    !(await messagingSource(route, identity))
   )
     throw new Error("Message destination changed.");
   switch (route.channel) {
     case "email": {
-      if (route.projectGrant) {
-        // Never let Reply-To, a reply-all suggestion, or a changed conversation
-        // choose the recipient of a challenge or project content.
-        return identity.sendEmail({
-          to: [route.sender],
-          subject: /^re:/i.test(route.mailSubject)
-            ? route.mailSubject
-            : "Re: " + route.mailSubject,
-          bodyText: text,
-          inReplyToMessageId: route.mailParent,
-          idempotencyKey,
-        });
-      }
       const parent = route.companionReply?.replyToMessageId ?? route.message;
       if (route.companionReply) {
         const source = await identity.getMessage(parent);
@@ -711,51 +724,34 @@ export async function sendReply(route, text, idempotencyKey, client, identity) {
     }
     case "sms":
       return identity.sendText({
-        ...(route.projectGrant
-          ? { to: route.sender }
-          : { conversationId: route.conversation }),
+        conversationId: route.conversation,
         text,
         idempotencyKey,
       });
     case "imessage":
       return identity.sendIMessage({
-        ...(route.projectGrant ? { plainReplyFallback: false } : {}),
         conversationId: route.conversation,
-        ...(route.subthread || (route.projectGrant && route.editApprovalPrompt)
-          ? { replyToMessageId: route.message }
-          : {}),
+        ...(route.subthread ? { replyToMessageId: route.message } : {}),
         text,
         idempotencyKey,
       });
     case "whatsapp":
       return identity.sendWhatsApp({
         conversationId: route.conversation,
-        ...(route.projectGrant && (route.subthread || route.editApprovalPrompt)
-          ? { replyToMessageId: route.message, plainReplyFallback: false }
-          : {}),
         text,
         idempotencyKey,
       });
     case "slack": {
-      if (!route.projectGrant && !(await slackSource(route, client, identity)))
+      if (!(await slackSource(route, client, identity)))
         throw new Error("Slack destination changed.");
-      const threadTs =
-        route.subthread ||
-        (route.projectGrant && route.editApprovalPrompt ? route.message : null);
+      const threadTs = route.subthread || null;
       const action = await client.slack.sendMessage(route.connection, {
         conversationId: route.conversation,
         threadTs,
         text,
         idempotencyKey,
       });
-      if (
-        action.status !== "sent" ||
-        (route.projectGrant &&
-          (!action.messageTs ||
-            action.connectionId !== route.connection ||
-            action.conversationId !== route.conversation ||
-            (action.threadTs ?? null) !== threadTs))
-      )
+      if (action.status !== "sent")
         throw new Error("Slack send not confirmed.");
       return action;
     }

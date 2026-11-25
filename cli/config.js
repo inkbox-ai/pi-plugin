@@ -1,4 +1,3 @@
-import { validateProjectConfig } from "../gateway/project-grants.js";
 import {
   mkdirSync,
   readFileSync,
@@ -190,31 +189,23 @@ export function loadConfig(env = process.env) {
     throw new Error("Choose auto or mention for groupReplyMode.");
   if (!["safe", "relaxed"].includes(companionResponseMode))
     throw new Error("Choose safe or relaxed for companionResponseMode.");
-  const readSetting =
-    env.INKBOX_PI_PROJECT_READ_WORKSPACE ??
-    (sameIdentity && saved.projectReadWorkspace) ??
-    false;
-  if (![true, false, "true", "false"].includes(readSetting))
-    throw new Error("Choose true or false for projectReadWorkspace.");
-  let testCommand = (sameIdentity && saved.projectTestCommand) || [];
-  if (env.INKBOX_PI_PROJECT_TEST_COMMAND !== undefined) {
-    try {
-      testCommand = JSON.parse(env.INKBOX_PI_PROJECT_TEST_COMMAND);
-    } catch {
-      throw new Error(
-        "INKBOX_PI_PROJECT_TEST_COMMAND must be a JSON argument array.",
-      );
-    }
-  }
-  const project = {
-    projectReadWorkspace: readSetting === true || readSetting === "true",
-    projectTestCommand: testCommand,
-    trustedConversations: listSetting(
-      "INKBOX_PI_TRUSTED_CONVERSATIONS",
-      "trustedConversations",
-    ),
-  };
-  validateProjectConfig(project);
+  const memoriesSetting =
+    env.INKBOX_CONTACT_MEMORIES_ENABLED ??
+    (sameIdentity ? saved.contactMemories : undefined) ??
+    true;
+  if (![true, false, "true", "false"].includes(memoriesSetting))
+    throw new Error("Choose true or false for contactMemories.");
+  const permissionTimeoutS = Number(
+    env.INKBOX_PERMISSION_TIMEOUT_S ||
+      (sameIdentity && saved.permissionTimeoutS) ||
+      600,
+  );
+  if (
+    !Number.isInteger(permissionTimeoutS) ||
+    permissionTimeoutS < 10 ||
+    permissionTimeoutS > 1500
+  )
+    throw new Error("permissionTimeoutS must be between 10 and 1500 seconds.");
   return {
     home,
     baseUrl,
@@ -224,12 +215,14 @@ export function loadConfig(env = process.env) {
     groupReplyMode,
     companionResponseMode,
     slackEnabled,
-    ...project,
-    trustedAgentIds: listSetting(
-      "INKBOX_PI_TRUSTED_AGENT_IDS",
-      "trustedAgentIds",
-    ),
-    projectFiles: listSetting("INKBOX_PI_PROJECT_FILES", "projectFiles"),
+    contactMemories: memoriesSetting === true || memoriesSetting === "true",
+    permissionTimeoutS,
+    // Pi tools that run in a messaging turn without asking the conversation.
+    autoAllowedTools:
+      env.INKBOX_PI_AUTO_ALLOWED_TOOLS === undefined &&
+      !(sameIdentity && saved.autoAllowedTools)
+        ? undefined
+        : listSetting("INKBOX_PI_AUTO_ALLOWED_TOOLS", "autoAllowedTools"),
     apiKey:
       env.INKBOX_API_KEY ||
       (sameIdentity && saved.apiKey) ||

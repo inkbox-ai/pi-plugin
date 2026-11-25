@@ -102,5 +102,10 @@ test("recipient restrictions apply to remote writes, not verified local-equivale
     /not approved/,
   );
   assert.equal(deny.mock.callCount(), 1);
+  // The question names the operation, which is what an "always" answer covers.
+  const [title, message, patterns] = deny.mock.calls[0].arguments as any[];
+  assert.equal(title, "inkbox_remote_call");
+  assert.match(message, /inkbox_contact_create/);
+  assert.deepEqual(patterns, ["inkbox_contact_create"]);
   assert.equal(execute.mock.callCount(), 1);
 });

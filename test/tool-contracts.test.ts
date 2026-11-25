@@ -29,6 +29,21 @@ test("an A2A URL allowlist cannot authorize a different case-sensitive path", as
   await assert.rejects(() => approveOutbound(ctx, config, request), /allowlist/);
 });
 
+test("a confirmation names the destinations an always-allow answer would cover", async () => {
+  const calls = [];
+  const asking = { ...ctx, confirm: async (...args) => { calls.push(args); return true; } };
+  await approveOutbound(asking, ask, { tool: "inkbox_send_sms", recipients: ["+12025550101", "+12025550102"], summary: "Send text" });
+  await approveOutbound(asking, ask, { tool: "inkbox_remote_call", recipients: [], patterns: ["inkbox_contact_create"], summary: "Run operation" });
+  assert.deepEqual(calls.map(([title, , patterns]) => [title, patterns]), [
+    ["inkbox_send_sms", ["+12025550101", "+12025550102"]],
+    ["inkbox_remote_call", ["inkbox_contact_create"]],
+  ]);
+  assert.match(calls[0][1], /Send text/);
+  // With nothing to name there is nothing to approve.
+  await assert.rejects(() => approveOutbound(asking, ask, { tool: "inkbox_send_sms", recipients: [], summary: "Send text" }), /not approved/);
+  assert.equal(calls.length, 2);
+});
+
 test("sendEmail reads attachments from the Pi session directory and retains a stable request key", async t => {
   const directory = await mkdtemp(join(tmpdir(), "inkbox-pi-email-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
