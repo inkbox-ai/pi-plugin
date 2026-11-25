@@ -52,6 +52,8 @@ To restrict terminal sends to specific recipients, set `outbound` in that profil
 
 ## Running the gateway
 
+Gateway turns keep Pi’s system prompt (including a configured `SYSTEM.md` and `APPEND_SYSTEM.md`). Inkbox adds the agent’s messaging identity, the current channel and how replies are delivered; it does not replace the agent’s persona.
+
 Configure model access in Pi itself before starting a background service. The gateway listens for signed Inkbox events and starts Pi turns independently of the interactive terminal. Startup and `inkbox-pi doctor` check for a selected model and configured credentials without sending a model prompt. Replies that exceed the messaging channel’s limit are explicitly shortened; the complete answer remains in local Pi history. It saves conversation history locally and routes the reply to the originating conversation. Incoming messages are not permission to use the interactive session's tools or credentials. For example, an ordinary text can get an answer, but it cannot ask Pi to run the project tests or email a file. It cannot approve a terminal tool by replying from the phone. History is per conversation/thread rather than shared across channels for a contact. Unaddressed group messages suppressed by mention mode are not saved as running conversation context. A failed or unconfirmed delivery does not wake Pi or resend a reply. On the next incoming turn from that sender in the same conversation, Pi receives a short delivery-status note. Clearing the conversation also clears pending notes.
 
 | Command | Purpose |

@@ -254,6 +254,18 @@ test(
     await deliver("second", "follow-up question");
     await sent.promise;
     assert.equal(modelRequests.length, 2);
+    for (const request of modelRequests) {
+      const instructions = JSON.stringify(
+        request.messages.filter((m) =>
+          ["developer", "system"].includes(m.role),
+        ),
+      );
+      assert.match(instructions, /coding assistant running inside pi/i);
+      assert.match(instructions, /Your Inkbox handle: @fixture/);
+      assert.match(instructions, /Current channel: SMS/);
+      assert.match(instructions, /Your SMS number: \+12025550101/);
+      assert.doesNotMatch(instructions, /first question|follow-up question/);
+    }
     assert.match(JSON.stringify(modelRequests[1].messages), /first answer/);
     assert.match(
       JSON.stringify(modelRequests[1].messages),
@@ -319,6 +331,14 @@ async function projectSession(t, fixture, respond, config = {}) {
   });
   const api = "http://127.0.0.1:" + (await listen(server));
   configurePi(t, home, agentDir, api);
+  writeFileSync(
+    join(agentDir, "SYSTEM.md"),
+    "Operator identity prompt fixture.",
+  );
+  writeFileSync(
+    join(agentDir, "APPEND_SYSTEM.md"),
+    "Operator addendum fixture.",
+  );
   let runtime;
   t.after(async () => {
     await runtime?.close();
@@ -423,6 +443,16 @@ for (const [channel, makeFixture] of Object.entries(directChannels))
       assert.match(
         JSON.stringify(requests[0].messages),
         /Please change the status to ready/,
+      );
+      const system = requests[0].messages.filter((m) =>
+        ["developer", "system"].includes(m.role),
+      );
+      assert.match(JSON.stringify(system), /Operator identity prompt fixture/);
+      assert.match(JSON.stringify(system), /Operator addendum fixture/);
+      assert.match(JSON.stringify(system), /Current model: fixture\/fixture/);
+      assert.match(
+        JSON.stringify(system),
+        new RegExp("Current channel: " + channel, "i"),
       );
       const tools = requests[0].tools.map((tool) => tool.function);
       assert.deepEqual(tools.map(({ name }) => name).sort(), [

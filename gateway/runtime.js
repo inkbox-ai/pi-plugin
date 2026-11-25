@@ -67,6 +67,12 @@ export function createGatewayRuntime(
 ) {
   if (!identity?.id || !config.home)
     throw problem("Gateway identity and state directory required.");
+  const turnConfig = {
+    ...config,
+    identity: identity.agentHandle || config.identity,
+    mailboxAddress: identity.emailAddress || identity.mailbox?.emailAddress,
+    smsNumber: identity.phoneNumber?.number,
+  };
   const dir = journalDirectory(config, identity);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const owner = new DatabaseSync(join(dir, "owner.sqlite"));
@@ -499,7 +505,7 @@ export function createGatewayRuntime(
         route,
         AbortSignal.any([signal, ended.signal]),
       );
-      return await turn(config, route, file, signal, request, request);
+      return await turn(turnConfig, route, file, signal, request, request);
     } finally {
       ended.abort();
     }
@@ -692,7 +698,7 @@ export function createGatewayRuntime(
         answer =
           route.projectGrant && directBinding(route) && !route.noControls
             ? await directProjectTurn(job, route, file, signal)
-            : await turn(config, route, file, signal);
+            : await turn(turnConfig, route, file, signal);
         if (signal.aborted) return;
         if (route.channel === "a2a") parseA2AOutcome(answer);
         flush(file);
