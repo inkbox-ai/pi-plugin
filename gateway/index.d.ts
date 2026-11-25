@@ -15,6 +15,8 @@ export interface GatewayConfig {
   outbound?: { approval?: "ask" | "allowlist" | "auto"; allowedRecipients?: string[] };
   /** Account key the turn's Inkbox tools act with. */
   apiKey?: string;
+  /** Run Inkbox tools without the per-call question. Pi's own tools still ask. Default: false. */
+  autoApproveInkboxTools?: boolean;
   /** Pi tools that run without asking the conversation. Default: read, grep, find, ls. */
   autoAllowedTools?: string[];
   /** How long an approval question waits for an answer. Default: 600. */

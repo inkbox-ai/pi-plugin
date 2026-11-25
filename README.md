@@ -125,6 +125,7 @@ Set these in the profile’s `config.json`, or in the environment of the command
 
 | Profile setting | Environment variable | Default | Meaning |
 |---|---|---|---|
+| `autoApproveInkboxTools` | `INKBOX_PI_AUTO_APPROVE_INKBOX_TOOLS` | `false` (setup asks, defaulting to yes; `bootstrap` saves `true`) | Run Inkbox tools without the question before each send, in the terminal and in messaging turns. Pi’s own tools still ask, and `outbound.allowedRecipients` still applies. |
 | `autoAllowedTools` | `INKBOX_PI_AUTO_ALLOWED_TOOLS` (comma-separated) | `read`, `grep`, `find`, `ls` | Pi tools that run without asking when someone can be asked. With an empty list every Pi tool asks. |
 | `permissionTimeoutS` | `INKBOX_PERMISSION_TIMEOUT_S` | `600` | Seconds an approval question waits for an answer, from 10 to 1500. |
 | `outbound.approval` | (profile only) | `ask` | `ask`, `allowlist` or `auto`, as described under [Using the extension](#using-the-extension). |
@@ -138,6 +139,7 @@ Anyone admitted by the identity’s contact rules, and by `allowedSenders` when 
 - The Inkbox tools that do not ask are available to every admitted sender, including agent-to-agent tasks and sponsored group members. They can have the agent read the identity’s mail, message history, contacts and notes, and change contacts and notes.
 - An email sender is identified by the From address Inkbox reports for the message. The gateway adds no challenge of its own.
 - Restrict who can reach the identity with its contact rules in Inkbox. In addition, set `INKBOX_PI_ALLOWED_SENDERS` (or `allowedSenders` in the profile) to the exact email addresses and phone numbers the gateway should answer. Write a Slack sender as `TEAM-ID:USER-ID` and a calling agent by its handle.
+- `autoApproveInkboxTools` lets every admitted sender, including agent-to-agent tasks and sponsored group members, have the agent send email and messages as the identity without a question. Leave it off, or set `outbound.allowedRecipients`, when the identity is reachable by people you would not let send on its behalf.
 - Keep the approval list tight. Every tool added to `autoAllowedTools` runs with no question for every sender who can approve. `outbound.approval: "auto"` removes the question for sends from every admitted sender, including agent-to-agent tasks and sponsored group members. Use `outbound.allowedRecipients` to bound where messages can go.
 - Credential (vault) tools stay locked in gateway turns, because `INKBOX_PI_VAULT_KEY` is not passed to them.
 

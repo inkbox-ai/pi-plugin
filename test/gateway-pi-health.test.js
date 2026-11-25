@@ -67,6 +67,18 @@ function transcript(t, reasons) {
     ),
   );
 }
+test("a person's turn that ends without text sends nothing; an agent task still needs an outcome", async (t) => {
+  const silent = rpcFixture(
+    "(prompt, accepted, settled) => [accepted, " +
+      JSON.stringify(assistant("stop", "  ")) +
+      ", settled]",
+  );
+  assert.equal(await run(t, silent), "[SILENT]");
+  await assert.rejects(
+    run(t, silent, { channel: "a2a", sender: "peer", text: "task" }),
+    (error) => error.category === "pi-incomplete",
+  );
+});
 // The fixture answers with what Pi was started with and the prompt it was sent.
 async function launch(t, config, route, askPermission) {
   const fixture = await executable(

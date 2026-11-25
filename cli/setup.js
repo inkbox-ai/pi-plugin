@@ -255,7 +255,23 @@ export async function configure(config, options, io, clientFor = createClient) {
       io.print(
         "To opt in to SMS, text START to " + identity.phoneNumber.number,
       );
+    io.print(
+      "Pi uses Inkbox tools to send email and messages, read history and manage contacts. Trusting these tools skips the approval question before each Inkbox send; Pi's own command and file approvals are unchanged.",
+    );
+    profile.autoApproveInkboxTools = await io.confirm(
+      "Allow this agent to run Inkbox tools without asking each time?",
+      profile.autoApproveInkboxTools !== false,
+    );
+    io.print(
+      profile.autoApproveInkboxTools
+        ? "Inkbox tools will run without asking."
+        : "Pi will ask before each Inkbox send.",
+    );
+  } else if (typeof profile.autoApproveInkboxTools !== "boolean") {
+    // Unattended setup trusts the Inkbox tools unless a choice was already saved.
+    profile.autoApproveInkboxTools = true;
   }
+  saveProfile(config.home, profile);
 
   const status = await identity.getSigningKeyStatus();
   const rotated =

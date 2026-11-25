@@ -18,8 +18,12 @@ export function prompts() {
   return {
     print: console.log,
     ask: async (message) => (await rl.question(message + ": ")).trim(),
-    confirm: async (message) =>
-      /^(y|yes)$/i.test((await rl.question(message + " [y/N]: ")).trim()),
+    confirm: async (message, fallback = false) => {
+      const answer = (
+        await rl.question(message + (fallback ? " [Y/n]: " : " [y/N]: "))
+      ).trim();
+      return answer ? /^(y|yes)$/i.test(answer) : fallback;
+    },
     async secret(message) {
       process.stdout.write(message + ": ");
       hidden = true;

@@ -195,6 +195,12 @@ export function loadConfig(env = process.env) {
     true;
   if (![true, false, "true", "false"].includes(memoriesSetting))
     throw new Error("Choose true or false for contactMemories.");
+  const trustSetting =
+    env.INKBOX_PI_AUTO_APPROVE_INKBOX_TOOLS ??
+    (sameIdentity ? saved.autoApproveInkboxTools : undefined) ??
+    false;
+  if (![true, false, "true", "false"].includes(trustSetting))
+    throw new Error("Choose true or false for autoApproveInkboxTools.");
   const permissionTimeoutS = Number(
     env.INKBOX_PERMISSION_TIMEOUT_S ||
       (sameIdentity && saved.permissionTimeoutS) ||
@@ -217,6 +223,8 @@ export function loadConfig(env = process.env) {
     slackEnabled,
     contactMemories: memoriesSetting === true || memoriesSetting === "true",
     permissionTimeoutS,
+    // Run Inkbox tools without the per-call question. Pi's own tools still ask.
+    autoApproveInkboxTools: trustSetting === true || trustSetting === "true",
     // Pi tools that run in a messaging turn without asking the conversation.
     autoAllowedTools:
       env.INKBOX_PI_AUTO_ALLOWED_TOOLS === undefined &&

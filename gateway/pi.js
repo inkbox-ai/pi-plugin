@@ -71,6 +71,7 @@ export function runPiTurn(config, route, sessionFile, signal, askPermission) {
             tools: config.tools,
             outbound: config.outbound,
             slackEnabled: config.slackEnabled,
+            autoApproveInkboxTools: config.autoApproveInkboxTools,
             signingKeyConfigured: Boolean(config.signingKey),
           },
     });
@@ -194,8 +195,10 @@ export function runPiTurn(config, route, sessionFile, signal, askPermission) {
           .map((block) => block.text)
           .join("")
           .trim();
-        if (!answer) throw hostProblem("pi-incomplete");
-        resolve(answer);
+        // A person's turn that ends without text has nothing to send.
+        if (!answer && (external || route.channel === "a2a"))
+          throw hostProblem("pi-incomplete");
+        resolve(answer || "[SILENT]");
       } catch (error) {
         const problem = error?.operatorMessage
           ? error

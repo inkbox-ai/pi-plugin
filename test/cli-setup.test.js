@@ -197,6 +197,44 @@ test("replacing a revoked key is masked and leaves the saved profile untouched u
   assert.equal(readProfile(home).apiKey, "new-scoped");
 });
 
+test("setup asks whether to trust Inkbox tools, defaulting to yes; unattended setup trusts them unless a choice was saved", async (t) => {
+  const { home, config, clientFor } = fixture(t);
+  const options = { identity: "pi-example", key: "example-admin" };
+  await configure(config, options, undefined, clientFor);
+  assert.equal(readProfile(home).autoApproveInkboxTools, true);
+
+  const asked = [];
+  let answer = false;
+  const io = {
+    ask: async () => "",
+    secret: async () => "",
+    print() {},
+    confirm: async (message, fallback) => {
+      asked.push([message, fallback]);
+      return /Inkbox tools/.test(message) ? answer : false;
+    },
+  };
+  const current = () => loadConfig({ HOME: home, INKBOX_PI_HOME: home });
+  await configure(current(), { projectDir: home }, io, clientFor);
+  const question = asked.find(([message]) => /Inkbox tools/.test(message));
+  assert.match(question[0], /without asking each time/);
+  assert.equal(question[1], true);
+  assert.equal(readProfile(home).autoApproveInkboxTools, false);
+  assert.equal(current().autoApproveInkboxTools, false);
+
+  // A saved "no" becomes the default answer and survives unattended setup.
+  asked.length = 0;
+  await configure(current(), options, undefined, clientFor);
+  assert.equal(readProfile(home).autoApproveInkboxTools, false);
+  answer = true;
+  await configure(current(), { projectDir: home }, io, clientFor);
+  assert.equal(
+    asked.find(([message]) => /Inkbox tools/.test(message))[1],
+    false,
+  );
+  assert.equal(readProfile(home).autoApproveInkboxTools, true);
+});
+
 test("readiness rejects a known rotated key without mutating the saved profile", async (t) => {
   const { config, home } = fixture(t);
   const saved = {

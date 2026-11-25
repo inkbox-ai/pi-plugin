@@ -235,6 +235,33 @@ test("contact memories are on unless turned off, also without a saved profile fo
   );
 });
 
+test("trusting Inkbox tools is off until the profile or the environment turns it on", (t) => {
+  const dir = home(t);
+  const env = { HOME: dir, INKBOX_PI_HOME: dir };
+  assert.equal(loadConfig(env).autoApproveInkboxTools, false);
+  assert.equal(
+    loadConfig({ ...env, INKBOX_PI_AUTO_APPROVE_INKBOX_TOOLS: "true" })
+      .autoApproveInkboxTools,
+    true,
+  );
+  saveProfile(dir, { identity: "owner", autoApproveInkboxTools: true });
+  assert.equal(loadConfig(env).autoApproveInkboxTools, true);
+  assert.equal(
+    loadConfig({ ...env, INKBOX_PI_AUTO_APPROVE_INKBOX_TOOLS: "false" })
+      .autoApproveInkboxTools,
+    false,
+  );
+  // A choice saved for one identity is not carried to another.
+  assert.equal(
+    loadConfig({ ...env, INKBOX_IDENTITY: "other" }).autoApproveInkboxTools,
+    false,
+  );
+  assert.throws(
+    () => loadConfig({ ...env, INKBOX_PI_AUTO_APPROVE_INKBOX_TOOLS: "yes" }),
+    /autoApproveInkboxTools/,
+  );
+});
+
 test("a saved approval timeout and tool list belong to the identity they were saved for", (t) => {
   const dir = home(t);
   const env = { HOME: dir, INKBOX_PI_HOME: dir };

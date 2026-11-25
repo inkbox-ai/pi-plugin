@@ -261,6 +261,73 @@ test("a gateway confirmation hook replaces the terminal dialog, and local attach
   );
 });
 
+test("trusting Inkbox tools skips the question in the terminal and in a gateway turn, not the recipient rules", async (t) => {
+  const sent = [];
+  live(t).identity = {
+    id: "identity-1",
+    agentHandle: "pi-agent",
+    sendEmail: async (message) => {
+      sent.push(message);
+      return { id: "mail-" + (sent.length + 1) };
+    },
+  };
+  const args = {
+    to: ["first@example.com"],
+    subject: "Notes",
+    bodyText: "Hello",
+  };
+  const trusted = { ...credentials, autoApproveInkboxTools: true };
+
+  const terminal = host();
+  registerInkbox(terminal.pi, profile(t, trusted));
+  const ctx = session({
+    hasUI: true,
+    ui: { confirm: async () => assert.fail("Unexpected terminal dialog") },
+  });
+  await run(terminal.tools.get("inkbox_send_email"), args, ctx);
+  assert.equal(sent.length, 1);
+  assert.equal(
+    JSON.parse(await run(terminal.tools.get("inkbox_doctor"), {}))
+      .inkboxToolsAutoApproved,
+    true,
+  );
+
+  const turn = host();
+  registerInkbox(turn.pi, profile(t, trusted), {
+    confirm: async () => assert.fail("Unexpected question in the conversation"),
+  });
+  await run(turn.tools.get("inkbox_send_email"), args);
+  assert.equal(sent.length, 2);
+
+  const bounded = host();
+  registerInkbox(
+    bounded.pi,
+    profile(t, {
+      ...trusted,
+      outbound: { allowedRecipients: ["owner@example.com"] },
+    }),
+  );
+  await assert.rejects(
+    run(bounded.tools.get("inkbox_send_email"), args, ctx),
+    /allowlist/,
+  );
+  assert.equal(sent.length, 2);
+
+  // Without the setting the default is still to ask.
+  const asking = host();
+  registerInkbox(asking.pi, profile(t, credentials));
+  assert.equal(
+    JSON.parse(await run(asking.tools.get("inkbox_doctor"), {}))
+      .inkboxToolsAutoApproved,
+    false,
+  );
+  await assert.rejects(
+    run(asking.tools.get("inkbox_send_email"), args),
+    /not approved/,
+  );
+  assert.equal(sent.length, 2);
+});
+
 test("a gateway turn has the diagnostics, bound to the identity the gateway verified", async (t) => {
   live(t).identity = {
     id: "identity-1",
