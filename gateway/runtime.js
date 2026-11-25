@@ -465,6 +465,24 @@ export function createGatewayRuntime(
         ).run(route.thread, route.sender, JSON.stringify(route), job.id);
         return;
       }
+      const contact = await describeSender(route, resolveContact);
+      if (signal.aborted) return;
+      // The address book can know a sender the event did not name. Their
+      // messages and commands belong to that person's one session.
+      if (
+        !route.person &&
+        contact?.id &&
+        !route.group &&
+        !route.companion &&
+        ["email", "sms", "imessage", "whatsapp"].includes(route.channel)
+      ) {
+        route.person = contact.id;
+        route.thread = digest("contact", route.person);
+        db.prepare(
+          "UPDATE jobs SET thread=?, actor=?, payload=? WHERE id=? AND state='queued'",
+        ).run(route.thread, route.person, JSON.stringify(route), job.id);
+        return;
+      }
       if (job.command && route.noControls) {
         mark.run("ignored", job.id);
         return;
@@ -477,8 +495,7 @@ export function createGatewayRuntime(
         if (session && !getSession.get(job.thread))
           rmSync(pathFor(session.revision), { force: true });
       } else {
-        route.contact = await describeSender(route, resolveContact);
-        if (signal.aborted) return;
+        route.contact = contact;
         if (route.group) route.memories = [];
         const notes = delivery.unread(job);
         route.deliveryContext = describeDelivery(notes);

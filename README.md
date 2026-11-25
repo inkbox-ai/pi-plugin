@@ -145,7 +145,7 @@ Anyone admitted by the identity’s contact rules, and by `allowedSenders` when 
 
 ### Sessions and controls
 
-A sender that Inkbox resolves to one of your contacts has one session across one-to-one email, SMS, iMessage and WhatsApp, so the agent keeps its context when that person changes channel. Groups, Slack conversations and threads, agent-to-agent tasks, and senders with no contact each have a session per conversation. Unaddressed group messages suppressed by mention mode are not saved as conversation context. History is saved locally in the profile directory.
+A sender that resolves to one of your contacts, on the event itself or by the address-book lookup, has one session across one-to-one email, SMS, iMessage and WhatsApp, so the agent keeps its context when that person changes channel. Groups, Slack conversations and threads, agent-to-agent tasks, and senders with no contact each have a session per conversation. Unaddressed group messages suppressed by mention mode are not saved as conversation context. History is saved locally in the profile directory.
 
 In a direct conversation, send `/status` for work status, `/stop` or `/cancel` to stop work, or `/new` or `/clear` to start a fresh session. These are messages to the gateway, not commands to type at a shell. They act only on the sender’s own session and are not available in group conversations or to agent-to-agent tasks. `/stop` asks Pi to end the commands it is running, and forces Pi to exit if it is still running three seconds later. Stopping a turn does not undo what it already did. Use `INKBOX_GROUP_REPLY_MODE=mention` to limit ordinary group wake-ups to messages addressing the agent.
 

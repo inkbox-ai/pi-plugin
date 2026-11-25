@@ -540,6 +540,61 @@ test(
 );
 
 test(
+  "a sender only the address book knows still gets their one session, and their commands act on it",
+  { timeout: 8000 },
+  async (t) => {
+    const client = {
+      contacts: {
+        lookup: async (query) =>
+          query.phone === ALEX ? [{ id: "contact-1", phones: [] }] : [],
+      },
+    };
+    const histories = [];
+    const { runtime, sent, turns, finished } = await gateway(t, {
+      identity: agent({ direct: [ALEX], stranger: [SAM] }),
+      client,
+      async turn({ route, file }) {
+        histories.push(await remember(file, route.message));
+        return "Noted.";
+      },
+    });
+    // This event names the contact; the next one, from the same number, does not.
+    runtime.acceptVerified(
+      sms("named", "One", { contacts: [{ id: "contact-1", name: "Alex" }] }),
+    );
+    await finished("named");
+    runtime.acceptVerified(sms("unnamed", "Two"));
+    await finished("unnamed");
+    const session = digest("contact", "contact-1");
+    assert.deepEqual(
+      turns.map((route) => [route.person, route.thread]),
+      [
+        ["contact-1", session],
+        ["contact-1", session],
+      ],
+    );
+    assert.deepEqual(histories, ["", "named;"]);
+
+    // A sender nobody knows keeps the conversation's own session.
+    runtime.acceptVerified(
+      sms("stranger", "Three", { conversation: "stranger", from: SAM }),
+    );
+    await finished("stranger");
+    assert.equal(turns[2].person, null);
+    assert.equal(turns[2].thread, turns[2].conversationThread);
+    assert.equal(histories[2], "");
+
+    // The unnamed sender's /clear resets the session their messages are in.
+    runtime.acceptVerified(sms("reset", "/clear"));
+    await finished("reset");
+    assert.match(sent.at(-1).text, /^Conversation cleared\./);
+    runtime.acceptVerified(sms("after", "Four"));
+    await finished("after");
+    assert.equal(histories[3], "");
+  },
+);
+
+test(
   "the turn is told who is writing: the contact card and their memories",
   { timeout: 8000 },
   async (t) => {
