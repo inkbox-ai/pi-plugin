@@ -745,7 +745,11 @@ test(
     );
     const { runtime, turns, unattended, finished } = await gateway(t, {
       identity,
-      turn: async () => "[SILENT]",
+      // A real turn always leaves its session file behind.
+      async turn({ route, file }) {
+        await remember(file, route.message);
+        return "[SILENT]";
+      },
     });
     runtime.acceptVerified(
       callEnded("call-im", { origin: "dedicated_imessage_number" }),
