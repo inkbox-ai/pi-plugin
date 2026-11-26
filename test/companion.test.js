@@ -279,6 +279,7 @@ test("subscriptions request receipts for every configured messaging channel", as
   const wanted = rows.flatMap((row) => row.eventTypes);
   for (const type of [
     "message.transcription_finished",
+    "call.ended",
     "message.failed",
     "message.bounced",
     "text.delivery_failed",

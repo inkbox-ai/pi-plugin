@@ -1,6 +1,6 @@
 import { statSync } from "node:fs";
 import { resolve } from "node:path";
-import { Inkbox } from "@inkbox/sdk";
+import { IncomingCallAction, Inkbox } from "@inkbox/sdk";
 import {
   normalizeOrigin,
   readProfile,
@@ -130,6 +130,16 @@ async function resolveKey(options, previous, io, clientFor) {
   };
 }
 
+// Phone calls to the identity are answered by Inkbox's call agent; the gateway
+// receives the transcript when a call ends.
+async function answerCalls(identity) {
+  const current = await identity.getIncomingCallAction();
+  if (current.incomingCallAction === IncomingCallAction.HOSTED_AGENT) return;
+  await identity.setIncomingCallAction({
+    incomingCallAction: IncomingCallAction.HOSTED_AGENT,
+  });
+}
+
 export async function configure(config, options, io, clientFor = createClient) {
   const previous = readProfile(config.home);
   const baseUrl = normalizeOrigin(options.baseUrl || config.baseUrl);
@@ -255,8 +265,26 @@ export async function configure(config, options, io, clientFor = createClient) {
       io.print(
         "To opt in to SMS, text START to " + identity.phoneNumber.number,
       );
+    if (
+      (identity.phoneNumber || identity.imessageEnabled) &&
+      (await io.confirm(
+        "Let Inkbox's call agent answer phone calls to this agent?",
+        true,
+      ))
+    ) {
+      try {
+        await answerCalls(identity);
+        io.print(
+          "Phone calls will be answered by Inkbox's call agent. Pi receives the transcript when a call ends.",
+        );
+      } catch {
+        io.print(
+          "Call answering could not be set up. You can retry with setup.",
+        );
+      }
+    }
     io.print(
-      "Pi uses Inkbox tools to send email and messages, read history and manage contacts. Trusting these tools skips the approval question before each Inkbox send; Pi's own command and file approvals are unchanged.",
+      "Pi uses Inkbox tools to send email and messages, place calls, read history and manage contacts. Trusting these tools skips the approval question before each Inkbox send; Pi's own command and file approvals are unchanged.",
     );
     profile.autoApproveInkboxTools = await io.confirm(
       "Allow this agent to run Inkbox tools without asking each time?",
@@ -267,9 +295,12 @@ export async function configure(config, options, io, clientFor = createClient) {
         ? "Inkbox tools will run without asking."
         : "Pi will ask before each Inkbox send.",
     );
-  } else if (typeof profile.autoApproveInkboxTools !== "boolean") {
+  } else {
     // Unattended setup trusts the Inkbox tools unless a choice was already saved.
-    profile.autoApproveInkboxTools = true;
+    if (typeof profile.autoApproveInkboxTools !== "boolean")
+      profile.autoApproveInkboxTools = true;
+    if (identity.phoneNumber || identity.imessageEnabled)
+      await answerCalls(identity).catch(() => {});
   }
   saveProfile(config.home, profile);
 

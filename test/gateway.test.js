@@ -160,7 +160,7 @@ test("reply routing is bound to the inbound group, never model-supplied destinat
   });
 });
 
-test("subscription reconciliation preserves another URL and excludes calling", async () => {
+test("subscription reconciliation preserves another URL and asks only for finished calls", async () => {
   const created = [];
   const client = {
     webhooks: {
@@ -186,8 +186,9 @@ test("subscription reconciliation preserves another URL and excludes calling", a
   assert.ok(n > 0);
   await subscribe(client, identity, "https://example.com/webhook");
   assert.equal(created.length, n);
-  assert.ok(
-    !created.flatMap((r) => r.eventTypes).some((e) => e.startsWith("call.")),
+  assert.deepEqual(
+    created.flatMap((r) => r.eventTypes).filter((e) => e.startsWith("call.")),
+    ["call.ended"],
   );
 });
 

@@ -20,7 +20,7 @@ Start Pi or run `/reload`. Use `/inkbox` to see the setup and gateway commands *
 
 To replace a revoked key for the same identity, run `inkbox-pi setup --replace-key`; the masked prompt verifies the replacement before saving it.
 
-Setup connects an existing agent or guides you through signup and verification. It can also configure iMessage and an optional dedicated SMS number. An SMS recipient may need to text START first. Phone and realtime voice calls are not included.
+Setup connects an existing agent or guides you through signup and verification. It can also configure iMessage and an optional dedicated SMS number. An SMS recipient may need to text START first. Setup also offers to let Inkbox’s call agent answer phone calls to the identity.
 
 ## Using the extension
 
@@ -31,6 +31,7 @@ Try “Show my Inkbox identity,” “List my unread emails,” or “Send a tex
 | Mail | List unread messages, inspect a thread, send email, optionally forward or mark read |
 | SMS and iMessage | Read direct or group conversations, send texts and attachments |
 | WhatsApp and Slack | Work with connected channels and their conversations |
+| Phone calls | Place a call that Inkbox’s call agent conducts, list calls and read transcripts |
 | Contacts, notes and access | Look up contacts, maintain notes, inspect channel contact rules |
 | Agent-to-agent tasks | Send a task, check its status and read the conversation |
 | Vault | Opt in to specific credential tools; plaintext tools require exact-name enablement |
@@ -80,6 +81,15 @@ Every admitted email, SMS, iMessage, WhatsApp or Slack message, and every agent-
 - **Replies.** Pi’s final answer is delivered automatically to the conversation the message came from. Markdown is removed on SMS, iMessage and WhatsApp. A reply that exceeds the channel’s limit is explicitly shortened; the complete answer remains in local Pi history. When the agent answers with exactly `[SILENT]`, nothing is sent. The send tools are for reaching a different recipient or channel, such as “email me the full report.”
 - **Interrupted turns.** A turn can run for up to 30 minutes, not counting time spent waiting for an approval answer. A turn that never started in Pi is retried. A turn that started and then ends early, because Pi failed, the turn was stopped or the gateway restarted, is never run again, since it may already have acted. Whatever it did remains.
 - **Delivery status.** A failed or unconfirmed delivery does not wake Pi or resend a reply. On that sender’s next turn in the same session, Pi receives a short delivery-status note. Clearing the session also clears pending notes.
+
+### Phone calls
+
+Phone calls are conducted by Inkbox’s call agent, not by Pi. Pi starts a call with `inkbox_place_call`, giving it a purpose that becomes the call agent’s task, and reviews earlier calls with `inkbox_list_calls` and `inkbox_list_call_transcripts`. Placing a call asks for approval like any other Inkbox send.
+
+- **Incoming calls.** `inkbox-pi setup` asks whether Inkbox’s call agent should answer calls to the identity (default yes); `bootstrap` turns it on for an identity with a phone number or iMessage. The live call does not reach Pi.
+- **After a call.** When a call the call agent conducted ends, the gateway starts a turn in the caller’s session with a report: the outcome, the transcript and any follow-ups the call agent promised. Pi completes those follow-ups through its tools, for example by texting the other party. Its reply to the report is not sent to anyone.
+- **Approvals in that turn.** A finished-call report has nobody to ask, so no Pi tool runs and an Inkbox send needs `autoApproveInkboxTools` or `outbound.approval: "auto"`. Without one of them a promised follow-up text is refused.
+- Realtime voice from Pi itself is not included.
 
 ### Who the agent is talking to
 

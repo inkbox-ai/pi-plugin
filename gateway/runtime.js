@@ -354,6 +354,7 @@ export function createGatewayRuntime(
     if (
       route.channel === "a2a" ||
       route.channel === "external" ||
+      route.channel === "call" ||
       route.companion ||
       route.sponsored
     )
@@ -474,7 +475,7 @@ export function createGatewayRuntime(
         contact?.id &&
         !route.group &&
         !route.companion &&
-        ["email", "sms", "imessage", "whatsapp"].includes(route.channel)
+        ["email", "sms", "imessage", "whatsapp", "call"].includes(route.channel)
       ) {
         route.person = contact.id;
         route.thread = digest("contact", route.person);
@@ -540,8 +541,8 @@ export function createGatewayRuntime(
       }
     }
     if (closed || signal.aborted) return;
-    if (route.channel === "external") {
-      // An external event is a capture turn, not authorization to contact anyone.
+    if (route.channel === "external" || route.channel === "call") {
+      // A capture turn has no conversation to answer; the agent acted through tools.
       db.prepare("UPDATE jobs SET state='done', payload=NULL WHERE id=?").run(
         job.id,
       );

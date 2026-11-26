@@ -88,8 +88,12 @@ test("Pi can register tools without credentials and shows setup commands", async
       assert(tools.has(name), name);
     assert(!tools.has("inkbox_slack_search"));
     assert(!tools.has("inkbox_credentials_get_secret"));
-    assert(!tools.has("inkbox_place_call"));
-    assert(!tools.has("inkbox_list_call_transcripts"));
+    for (const name of [
+      "inkbox_place_call",
+      "inkbox_list_calls",
+      "inkbox_list_call_transcripts",
+    ])
+      assert(tools.has(name), name);
     assert.equal(tools.get("inkbox_send_sms").parameters.type, "object");
     const tool = tools.get("inkbox_send_email");
     await assert.rejects(
@@ -153,6 +157,79 @@ test("every tool in the catalog is listed with a one-line prompt snippet", async
     assert.ok(!tool.promptSnippet.includes("\n"), tool.name);
     assert.ok(tool.description.startsWith(tool.promptSnippet), tool.name);
   }
+});
+
+test("a call is handed to the call agent with its task, after the usual approval", async (t) => {
+  const placed = [];
+  live(t).identity = {
+    id: "identity-1",
+    agentHandle: "pi-agent",
+    placeCall: async (options) => {
+      placed.push(options);
+      return { id: "call-1", status: "initiated" };
+    },
+    listCalls: async ({ limit }) => [
+      {
+        id: "call-1",
+        direction: "outbound",
+        remotePhoneNumber: "+12025550102",
+        status: "completed",
+        hangupReason: "remote",
+        startedAt: new Date("2026-01-02T03:04:05Z"),
+        reason: "Confirm the appointment",
+        limit,
+      },
+    ],
+    listTranscripts: async () => [
+      { seq: 2, party: "remote", text: "Yes, Tuesday works." },
+      { seq: 1, party: "local", text: "Is Tuesday still good?" },
+    ],
+  };
+  const asked = [];
+  const { pi, tools } = host();
+  registerInkbox(pi, profile(t, credentials), {
+    confirm: async (_ctx, request) => {
+      asked.push(request);
+      return true;
+    },
+  });
+  const place = tools.get("inkbox_place_call");
+  await assert.rejects(
+    run(place, { toNumber: "2025550102", purpose: "Confirm" }),
+    /E\.164/,
+  );
+  assert.equal(asked.length, 0);
+  const output = await run(place, {
+    toNumber: "+12025550102",
+    purpose: "Confirm the appointment",
+    openingMessage: "Hi, this is the scheduling assistant.",
+    context: "The appointment is Tuesday at 3.",
+    origination: "dedicated_number",
+  });
+  assert.match(output, /call-1/);
+  assert.match(output, /when the call ends/);
+  assert.equal(asked[0].title, "inkbox_place_call");
+  assert.deepEqual(asked[0].patterns, ["+12025550102"]);
+  assert.ok(asked[0].message.includes("Confirm the appointment"));
+  assert.deepEqual(placed, [
+    {
+      toNumber: "+12025550102",
+      mode: "hosted_agent",
+      reason:
+        "Confirm the appointment\n\nOpen the call with: Hi, this is the scheduling assistant.\n\nBackground: The appointment is Tuesday at 3.",
+      origination: "dedicated_number",
+    },
+  ]);
+
+  const calls = await run(tools.get("inkbox_list_calls"), {});
+  assert.match(
+    calls,
+    /^id=call-1 outbound with=\+12025550102 status=completed ended_by=remote started=2026-01-02T03:04:05\.000Z purpose="Confirm the appointment"$/,
+  );
+  assert.equal(
+    await run(tools.get("inkbox_list_call_transcripts"), { callId: "call-1" }),
+    "Agent: Is Tuesday still good?\nOther party: Yes, Tuesday works.",
+  );
 });
 
 test("whoami reports the SMS and iMessage numbers as separate lines", async (t) => {

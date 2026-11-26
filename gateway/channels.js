@@ -35,6 +35,57 @@ const slackEvents = [
 ];
 const taskEvents = ["a2a.task.created", "a2a.task.message"];
 
+const callParty = { local: "Agent", remote: "Other party" };
+// What a finished call leaves for the agent: the outcome, the transcript and
+// anything the call agent promised to do afterwards.
+function callReport(data) {
+  const call = data.call;
+  const entries = Array.isArray(data.transcript?.entries)
+    ? data.transcript.entries
+    : [];
+  const transcript = entries
+    .map((entry) =>
+      entry?.marker === "abridged"
+        ? "[" + (entry.omitted_turns ?? "some") + " turns omitted]"
+        : clean(entry?.text) &&
+          (callParty[entry.party] ?? "System") + ": " + clean(entry.text),
+    )
+    .filter(Boolean)
+    .join("\n")
+    .slice(0, 24_000);
+  const actions = (
+    Array.isArray(data.post_call_action_items)
+      ? data.post_call_action_items
+      : []
+  )
+    .filter((item) => clean(item?.action))
+    .map(
+      (item, index) =>
+        index +
+        1 +
+        ". " +
+        clean(item.action) +
+        (clean(item.details) ? "\n   Details: " + clean(item.details) : ""),
+    );
+  return [
+    "Inkbox's call agent finished this phone call. This is a report, not a message from a person.",
+    "Direction: " + clean(call.direction),
+    "Outcome: " + (clean(data.outcome) || clean(call.status)),
+    clean(call.hangup_reason) && "Ended by: " + clean(call.hangup_reason),
+    "Other party's phone number: " +
+      clean(call.remote_phone_number) +
+      ". Use this exact number for a callback or a text about this call.",
+    clean(call.reason) && "Task given to the call agent: " + clean(call.reason),
+    transcript
+      ? "Call transcript:\n" + transcript
+      : "No transcript was captured for this call.",
+    actions.length && "Open follow-ups from the call:\n" + actions.join("\n"),
+    "Complete each open follow-up once, through your tools. Do not repeat work already done during the call. Your reply to this report is not delivered to anyone; when nothing remains, reply with exactly [SILENT].",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
 /** The event envelope is authenticated before this function is called. Routes are never taken from model output. */
 export function parseRoute(event, identity, allowedSenders = [], options = {}) {
   const data = event?.data;
@@ -169,6 +220,13 @@ export function parseRoute(event, identity, allowedSenders = [], options = {}) {
       .join("\n");
     // Task-created events can contain just a reference. Read the task from the authenticated identity.
     if (!text) text = "[Task message]";
+  } else if (event.event_type === "call.ended") {
+    // Only calls the call agent conducted are reported; there is no reply.
+    if (data.call?.mode !== "hosted_agent") return null;
+    channel = "call";
+    sender = clean(data.call.remote_phone_number);
+    conversation = message = clean(data.call.id);
+    text = callReport(data);
   } else {
     record =
       event.event_type === "text.received" ? data.text_message : data.message;
@@ -363,6 +421,7 @@ export function parseRoute(event, identity, allowedSenders = [], options = {}) {
     route.group ||
     Boolean(route.companion) ||
     route.channel === "a2a" ||
+    route.channel === "call" ||
     (channel === "slack" && allowedSenders.length > 0);
   if (
     route.group &&
@@ -393,7 +452,7 @@ export function parseRoute(event, identity, allowedSenders = [], options = {}) {
   route.person =
     !route.group &&
     !route.companion &&
-    ["email", "sms", "imessage", "whatsapp"].includes(channel) &&
+    ["email", "sms", "imessage", "whatsapp", "call"].includes(channel) &&
     people.contact?.id
       ? people.contact.id
       : null;
@@ -675,6 +734,7 @@ export async function beforeTurn(
   { hasSession = false } = {},
 ) {
   if (route.channel === "a2a") return taskSource(route, identity);
+  if (route.channel === "call") return true;
   if (route.channel === "slack") {
     if (!(await slackSource(route, client, identity))) return false;
   } else if (!(await messagingSource(route, identity))) return false;
@@ -781,7 +841,11 @@ export async function subscribe(
       { phoneNumberId: identity.phoneNumber.id },
       ["text.received", "text.delivery_failed", "text.delivery_unconfirmed"],
     ]);
-  const identityEvents = ["message.transcription_finished", ...taskEvents];
+  const identityEvents = [
+    "message.transcription_finished",
+    "call.ended",
+    ...taskEvents,
+  ];
   if (slackEnabled) identityEvents.push(...slackEvents);
   if (identity.imessageEnabled)
     identityEvents.push("imessage.received", "imessage.delivery_failed");

@@ -7,6 +7,7 @@ import { createVaultRuntime } from "./vault.ts";
 import { isToolEnabled } from "./selection.js";
 import { a2aTools } from "./tools/a2a.ts";
 import { accessTools } from "./tools/access.ts";
+import { callTools } from "./tools/calls.ts";
 import { contactRuleTools } from "./tools/contact-rules.ts";
 import { contactTools } from "./tools/contacts.ts";
 import { emailReadTools } from "./tools/email-reads.ts";
@@ -85,6 +86,7 @@ export function registerInkbox(
   const local = [
     a2aTools,
     accessTools,
+    callTools,
     contactRuleTools,
     contactTools,
     emailReadTools,
@@ -151,7 +153,7 @@ export function registerInkbox(
             whatsappNumber: identity.whatsappNumber ?? null,
             lines: {
               phone: identity.phoneNumber?.number
-                ? "Your own number for SMS."
+                ? "Your own number for SMS and phone calls."
                 : "No SMS number is provisioned.",
               imessage: !identity.imessageEnabled
                 ? "iMessage is not enabled."

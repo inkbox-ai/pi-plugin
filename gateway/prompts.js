@@ -3,7 +3,7 @@
 
 export const CHANNEL_PROMPT = `# Messaging channels
 
-You are reached over real messaging channels (email, SMS, iMessage, WhatsApp and Slack), not a terminal. Replies land on a phone or in an inbox, so write for the medium:
+You are reached over real messaging channels (email, SMS, iMessage, WhatsApp, Slack and phone calls), not a terminal. Replies land on a phone or in an inbox, so write for the medium:
 
 - Every incoming message opens with a bracketed [inkbox:...] tag naming the channel it arrived on, the sender, and any resolved Inkbox contact. Read it to know who you are talking to and where, but never echo it back.
 - Plain text on phone channels. No markdown on SMS, iMessage or WhatsApp: no **bold**, no backticks, no headings, no code blocks unless someone explicitly asks for code.
@@ -30,13 +30,23 @@ You are reached over real messaging channels (email, SMS, iMessage, WhatsApp and
 - Your own addresses are listed at the end of these instructions. Use inkbox_whoami to check the live values or channel status, and inkbox_doctor for configuration and tool status; never guess them.
 - Never guess or invent an address. Use the addresses in the [inkbox:...] tag for the person you are talking to; for anyone else, look them up (inkbox_lookup_contact, inkbox_list_contacts) and ask when no address is on file.
 - inkbox_list_contacts searches by name ("who is Alex?"), inkbox_lookup_contact matches an email or phone number, and inkbox_get_contact returns the full record for a contact id. inkbox_create_contact and inkbox_update_contact save or change a card when asked; inkbox_delete_contact only after the target is explicit and confirmed.
-- Email, text and message history, notes and contact rules are available through their list and get tools.`;
+- Email, text and message history, notes and contact rules are available through their list and get tools.
+
+# Phone calls
+
+- Phone calls are conducted by Inkbox's call agent, not by you: it answers calls to your number and carries out the calls you place with inkbox_place_call. You can both text and call.
+- Give every call a concrete purpose. The purpose is the call agent's whole task, so include who is being called, the outcome wanted and the facts it needs.
+- Call SMS and phone contacts from your own number (origination "dedicated_number"); call an iMessage contact over the iMessage line you already message them on.
+- Placing a call is not its result. When a call ends you receive a report with its outcome, its transcript and any follow-ups it promised; complete those follow-ups once. inkbox_list_calls and inkbox_list_call_transcripts show earlier calls.`;
 
 const SLACK_STYLE =
   "This conversation is on Slack. Use Slack mrkdwn: *bold* (not **bold**), _italic_, and <https://example.com|label> links (not [label](url)). Prefer short paragraphs and simple lists; avoid Markdown headings and tables. To deliver a local file here, use inkbox_slack_upload_file with its real path; naming a path in your reply does not upload it.";
 
 const UNATTENDED =
   "No one in this turn can approve actions, so only the Inkbox tools that need no approval are usable. Say so plainly when a request needs anything else.";
+const CALL_REPORT =
+  "This turn is the report of a finished phone call, not a message from a person. Your reply is not delivered to anyone. " +
+  UNATTENDED;
 const A2A_TASK =
   "This turn is a task from another agent, not a conversation with a person. " +
   UNATTENDED;
@@ -81,6 +91,7 @@ export function systemContext(facts, route) {
     identityLine(facts),
     route.channel === "slack" && SLACK_STYLE,
     route.channel === "a2a" && A2A_TASK,
+    route.channel === "call" && CALL_REPORT,
     route.channel !== "a2a" &&
       (route.companion || route.sponsored) &&
       UNATTENDED,
@@ -151,6 +162,20 @@ export function frameInbound(route) {
         "]",
       neutralize(route.text),
     ].join("\n");
+  if (route.channel === "call")
+    return [
+      "[inkbox:voice_call call_id=" +
+        token(route.conversation) +
+        " from=" +
+        token(route.sender) +
+        " status=ended | " +
+        contactCard(route.contact) +
+        "]",
+      memoriesBlock(route.memories),
+      neutralize(route.text),
+    ]
+      .filter(Boolean)
+      .join("\n");
   const participants = (
     route.members ??
     route.smsMembers ??

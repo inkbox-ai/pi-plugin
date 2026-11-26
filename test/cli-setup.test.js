@@ -235,6 +235,54 @@ test("setup asks whether to trust Inkbox tools, defaulting to yes; unattended se
   assert.equal(readProfile(home).autoApproveInkboxTools, true);
 });
 
+test("setup hands incoming calls to the call agent when the identity can take calls, unless declined", async (t) => {
+  const { home, config, clientFor } = fixture(t);
+  const options = { identity: "pi-example", key: "example-admin" };
+  const base = await clientFor("example-scoped").getIdentity();
+  let action = "auto_accept";
+  const changes = [];
+  const phone = Object.assign(base, {
+    getIncomingCallAction: async () => ({ incomingCallAction: action }),
+    setIncomingCallAction: async (change) => {
+      changes.push(change);
+      action = change.incomingCallAction;
+    },
+  });
+  // No number and no iMessage: there are no calls to answer.
+  await configure(config, options, undefined, clientFor);
+  assert.deepEqual(changes, []);
+
+  phone.phoneNumber = { number: "+12025550101" };
+  await configure(config, options, undefined, clientFor);
+  assert.deepEqual(changes, [{ incomingCallAction: "hosted_agent" }]);
+  // Already answered by the call agent: nothing to change.
+  await configure(config, options, undefined, clientFor);
+  assert.equal(changes.length, 1);
+
+  action = "auto_accept";
+  const asked = [];
+  let accept = false;
+  const io = {
+    ask: async () => "",
+    secret: async () => "",
+    print() {},
+    confirm: async (message, fallback) => {
+      asked.push([message, fallback]);
+      return /call agent/.test(message) ? accept : false;
+    },
+  };
+  const current = () => loadConfig({ HOME: home, INKBOX_PI_HOME: home });
+  await configure(current(), { projectDir: home }, io, clientFor);
+  assert.deepEqual(
+    asked.find(([message]) => /call agent/.test(message)),
+    ["Let Inkbox's call agent answer phone calls to this agent?", true],
+  );
+  assert.equal(changes.length, 1);
+  accept = true;
+  await configure(current(), { projectDir: home }, io, clientFor);
+  assert.deepEqual(changes[1], { incomingCallAction: "hosted_agent" });
+});
+
 test("readiness rejects a known rotated key without mutating the saved profile", async (t) => {
   const { config, home } = fixture(t);
   const saved = {
