@@ -80,7 +80,6 @@ function callReport(data) {
       ? "Call transcript:\n" + transcript
       : "No transcript was captured for this call.",
     actions.length && "Open follow-ups from the call:\n" + actions.join("\n"),
-    "Complete each open follow-up once, through your tools. Do not repeat work already done during the call. Your reply to this report is not delivered to anyone; when nothing remains, reply with exactly [SILENT].",
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -118,6 +117,7 @@ export function parseRoute(event, identity, allowedSenders = [], options = {}) {
     subject,
     rfcMessageId,
     senderProfile,
+    callOrigin,
     caption;
   if (
     event.companion != null &&
@@ -226,6 +226,7 @@ export function parseRoute(event, identity, allowedSenders = [], options = {}) {
     channel = "call";
     sender = clean(data.call.remote_phone_number);
     conversation = message = clean(data.call.id);
+    callOrigin = clean(data.call.origin) || "dedicated_number";
     text = callReport(data);
   } else {
     record =
@@ -367,6 +368,7 @@ export function parseRoute(event, identity, allowedSenders = [], options = {}) {
     subject,
     rfcMessageId,
     senderProfile,
+    callOrigin,
     eventContact: people.contact,
     eventAgent: people.agent,
     memories: options.contactMemories === false ? [] : people.memories,
@@ -747,6 +749,24 @@ export async function beforeTurn(
 }
 
 export async function sendReply(route, text, idempotencyKey, client, identity) {
+  // A call follow-up starts on the line the call used, not from a message.
+  if (route.followUp) {
+    if (
+      !recipientsAllowed(
+        route,
+        [route.sender],
+        [identity.phoneNumber?.number, identity.imessageNumber?.number],
+      )
+    )
+      throw new Error("Message destination changed.");
+    return route.channel === "sms"
+      ? identity.sendText({ to: route.sender, text, idempotencyKey })
+      : identity.sendIMessage({
+          conversationId: route.conversation,
+          text,
+          idempotencyKey,
+        });
+  }
   if (!(await companionStillActive(route, client, identity)))
     throw new Error("Companion reply scope has changed.");
   if (

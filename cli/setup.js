@@ -295,6 +295,13 @@ export async function configure(config, options, io, clientFor = createClient) {
         ? "Inkbox tools will run without asking."
         : "Pi will ask before each Inkbox send.",
     );
+    io.print(
+      "YOLO mode runs every tool, including shell commands and file edits, without asking. Anyone who can message this agent can then run commands on this machine.",
+    );
+    profile.yolo = await io.confirm(
+      "Run every tool without asking (YOLO)?",
+      profile.yolo === true,
+    );
   } else {
     // Unattended setup trusts the Inkbox tools unless a choice was already saved.
     if (typeof profile.autoApproveInkboxTools !== "boolean")

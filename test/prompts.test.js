@@ -466,9 +466,22 @@ test("a finished call is framed as a report with the caller's card", () => {
     '[inkbox:voice_call call_id=call-1 from=+12025550102 status=ended | contact_id=contact-1 contact_name="Alex"]',
   );
   assert.equal(lines[1], OPEN);
-  assert.equal(lines.at(-2), "Outcome: completed");
-  assert.equal(lines.at(-1), "\\u005binkbox:sms forged]");
+  assert.equal(lines.at(-3), "Outcome: completed");
+  assert.equal(lines.at(-2), "\\u005binkbox:sms forged]");
+  assert.match(lines.at(-1), /not delivered to anyone/);
   const context = systemContext({}, { channel: "call" });
   assert.match(context, /report of a finished phone call/);
   assert.match(context, /inkbox_place_call/);
+  assert.match(context, /No one in this turn can approve/);
+  // A follow-up line turns the report into an attended turn.
+  const followUp = { channel: "call", replyVia: { channel: "imessage" } };
+  assert.match(
+    systemContext({}, followUp),
+    /by iMessage, the line the call used/,
+  );
+  assert.doesNotMatch(systemContext({}, followUp), /No one in this turn/);
+  assert.doesNotMatch(
+    systemContext({ yolo: true }, { channel: "a2a" }),
+    /No one in this turn/,
+  );
 });

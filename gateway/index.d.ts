@@ -17,6 +17,8 @@ export interface GatewayConfig {
   apiKey?: string;
   /** Run Inkbox tools without the per-call question. Pi's own tools still ask. Default: false. */
   autoApproveInkboxTools?: boolean;
+  /** Run every tool in a messaging turn without asking anyone. Default: false. */
+  yolo?: boolean;
   /** Pi tools that run without asking the conversation. Default: read, grep, find, ls. */
   autoAllowedTools?: string[];
   /** How long an approval question waits for an answer. Default: 600. */

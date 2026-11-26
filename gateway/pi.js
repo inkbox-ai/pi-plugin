@@ -55,9 +55,11 @@ export function runPiTurn(config, route, sessionFile, signal, askPermission) {
         ? EXTERNAL_CONTEXT
         : systemContext(config, route) +
           (route.channel === "a2a" ? "\n\n" + A2A_RESPONSE_INSTRUCTIONS : ""),
-      // Without someone to ask, no Pi tool runs on its own either.
-      autoAllowedTools:
-        askPermission && !askPermission.unattended
+      // Without someone to ask, no Pi tool runs on its own either, unless
+      // the operator chose to run every tool without asking.
+      autoAllowedTools: config.yolo
+        ? ["*"]
+        : askPermission && !askPermission.unattended
           ? (config.autoAllowedTools ?? DEFAULT_AUTO_ALLOWED_TOOLS)
           : [],
       profile: external
@@ -71,7 +73,9 @@ export function runPiTurn(config, route, sessionFile, signal, askPermission) {
             tools: config.tools,
             outbound: config.outbound,
             slackEnabled: config.slackEnabled,
-            autoApproveInkboxTools: config.autoApproveInkboxTools,
+            autoApproveInkboxTools: Boolean(
+              config.autoApproveInkboxTools || config.yolo,
+            ),
             signingKeyConfigured: Boolean(config.signingKey),
           },
     });

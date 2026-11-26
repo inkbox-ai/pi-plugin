@@ -594,7 +594,7 @@ test(
   },
 );
 
-function callEnded(id, { mode = "hosted_agent", contacts } = {}) {
+function callEnded(id, { mode = "hosted_agent", contacts, origin } = {}) {
   return {
     id: "evt-" + id,
     event_type: "call.ended",
@@ -608,6 +608,7 @@ function callEnded(id, { mode = "hosted_agent", contacts } = {}) {
         hangup_reason: "remote",
         remote_phone_number: ALEX,
         local_phone_number: AGENT_NUMBER,
+        ...(origin ? { origin } : {}),
       },
       outcome: "completed",
       transcript: {
@@ -631,23 +632,29 @@ function callEnded(id, { mode = "hosted_agent", contacts } = {}) {
 }
 
 test(
-  "a call the call agent conducted is reported to the contact's session; nothing is sent in reply",
+  "a finished call is reported to the caller's session and followed up on the line the call used",
   { timeout: 8000 },
   async (t) => {
     const histories = [],
       framed = [];
-    const { runtime, sent, turns, unattended, finished } = await gateway(t, {
-      async turn({ route, file }) {
-        histories.push(await remember(file, route.message));
-        framed.push(frameInbound(route));
-        return route.channel === "call" ? "Texted the address." : "Noted.";
+    const { runtime, sent, turns, unattended, finished, texts } = await gateway(
+      t,
+      {
+        async turn({ route, file, askPermission }) {
+          histories.push(await remember(file, route.message));
+          framed.push(frameInbound(route));
+          if (route.message === "call-ask")
+            return "Decision: " + (await askPermission(ACTION));
+          return route.channel === "call" ? "Texted the address." : "Noted.";
+        },
       },
-    });
+    );
     const contacts = [{ id: "contact-1", name: "Alex" }];
     runtime.acceptVerified(sms("before", "Call me later", { contacts }));
     await finished("before");
     assert.equal(sent.length, 1);
 
+    // A call on the phone number is followed up by text to the caller.
     assert.equal(
       runtime.acceptVerified(callEnded("call-1", { contacts })),
       "accepted",
@@ -656,10 +663,13 @@ test(
     assert.equal(turns[1].channel, "call");
     assert.equal(turns[1].thread, digest("contact", "contact-1"));
     assert.equal(histories[1], "before;");
-    assert.equal(unattended[1], true);
-    // The report is recorded, never delivered: no conversation asked for it.
-    assert.equal(sent.length, 1);
-    assert.equal(runtime.eventResult("evt-call-1"), "Texted the address.");
+    assert.equal(unattended[1], false);
+    assert.equal(turns[1].replyVia.channel, "sms");
+    assert.equal(turns[1].replyVia.sender, ALEX);
+    assert.deepEqual(
+      [sent[1].channel, sent[1].text],
+      ["sms", "Texted the address."],
+    );
 
     const [tag, ...body] = framed[1].split("\n");
     assert.match(
@@ -674,11 +684,33 @@ test(
       "Other party: Text me the address after this call.",
       "1. Text the address",
       "Details: Office",
+      "sent to the other party by SMS",
       "[SILENT]",
     ])
       assert.ok(report.includes(part), part);
     // What was said on the call cannot pose as a routing tag.
     assert.ok(!report.includes("[inkbox:sms"));
+
+    // An approval question goes to that line, and a text from the caller answers it.
+    runtime.acceptVerified(callEnded("call-ask", { contacts }));
+    await until(() => texts().includes(QUESTION), "the question by text");
+    assert.equal(sent.at(-1).channel, "sms");
+    assert.equal(runtime.acceptVerified(sms("yes", "1")), "accepted");
+    await finished("call-ask");
+    assert.equal(runtime.eventState("evt-yes"), "done");
+    assert.equal(sent.at(-1).text, "Decision: once");
+    assert.equal(turns.length, 3);
+
+    // A call on an iMessage line with no conversation to continue has nobody to ask.
+    runtime.acceptVerified(
+      callEnded("call-im", { contacts, origin: "shared_imessage_number" }),
+    );
+    await finished("call-im");
+    assert.equal(unattended[3], true);
+    assert.equal(turns[3].replyVia, undefined);
+    assert.ok(framed[3].includes("not delivered to anyone"));
+    assert.equal(sent.at(-1).text, "Decision: once");
+    assert.equal(runtime.eventResult("evt-call-im"), "Texted the address.");
 
     // The same call is reported once, and a call nobody's agent conducted is not.
     assert.equal(
@@ -689,7 +721,42 @@ test(
       runtime.acceptVerified(callEnded("call-2", { mode: "client_websocket" })),
       "ignored",
     );
-    assert.equal(turns.length, 2);
+    assert.equal(turns.length, 4);
+  },
+);
+
+test(
+  "a call on the iMessage line is followed up in the caller's iMessage conversation",
+  { timeout: 8000 },
+  async (t) => {
+    const asked = [];
+    const identity = agent(
+      { direct: [ALEX] },
+      {
+        imessageEnabled: true,
+        async listIMessageConversations(options) {
+          asked.push(options);
+          return [
+            { id: "group", isGroup: true, remoteNumber: null },
+            { id: "im-direct", isGroup: false, remoteNumber: ALEX },
+          ];
+        },
+      },
+    );
+    const { runtime, turns, unattended, finished } = await gateway(t, {
+      identity,
+      turn: async () => "[SILENT]",
+    });
+    runtime.acceptVerified(
+      callEnded("call-im", { origin: "dedicated_imessage_number" }),
+    );
+    await finished("call-im");
+    assert.deepEqual(asked, [{ participants: [ALEX], includeGroups: false }]);
+    assert.equal(unattended[0], false);
+    assert.deepEqual(
+      [turns[0].replyVia.channel, turns[0].replyVia.conversation],
+      ["imessage", "im-direct"],
+    );
   },
 );
 

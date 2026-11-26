@@ -45,11 +45,26 @@ const SLACK_STYLE =
 const UNATTENDED =
   "No one in this turn can approve actions, so only the Inkbox tools that need no approval are usable. Say so plainly when a request needs anything else.";
 const CALL_REPORT =
-  "This turn is the report of a finished phone call, not a message from a person. Your reply is not delivered to anyone. " +
-  UNATTENDED;
+  "This turn is the report of a finished phone call, not a message from a person.";
 const A2A_TASK =
-  "This turn is a task from another agent, not a conversation with a person. " +
-  UNATTENDED;
+  "This turn is a task from another agent, not a conversation with a person.";
+
+const lineName = (route) => (route.channel === "sms" ? "SMS" : "iMessage");
+// What the turn is told about approvals when it is not an ordinary conversation.
+function turnNote(facts, route) {
+  const nobody = facts.yolo ? "" : " " + UNATTENDED;
+  if (route.channel === "a2a") return A2A_TASK + nobody;
+  if (route.channel === "call")
+    return (
+      CALL_REPORT +
+      (route.replyVia
+        ? " Your reply and any approval question go to the other party by " +
+          lineName(route.replyVia) +
+          ", the line the call used."
+        : " Your reply is not delivered to anyone." + nobody)
+    );
+  return (route.companion || route.sponsored) && !facts.yolo ? UNATTENDED : "";
+}
 
 /** One line naming the agent's own addresses, from the gateway's identity snapshot. */
 export function identityLine(facts = {}) {
@@ -90,11 +105,7 @@ export function systemContext(facts, route) {
     CHANNEL_PROMPT,
     identityLine(facts),
     route.channel === "slack" && SLACK_STYLE,
-    route.channel === "a2a" && A2A_TASK,
-    route.channel === "call" && CALL_REPORT,
-    route.channel !== "a2a" &&
-      (route.companion || route.sponsored) &&
-      UNATTENDED,
+    turnNote(facts, route),
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -173,6 +184,12 @@ export function frameInbound(route) {
         "]",
       memoriesBlock(route.memories),
       neutralize(route.text),
+      "Complete each open follow-up once, through your tools. Do not repeat work already done during the call. " +
+        (route.replyVia
+          ? "Your reply to this report is sent to the other party by " +
+            lineName(route.replyVia) +
+            ", the line the call used; when there is nothing to tell them, reply with exactly [SILENT]."
+          : "Your reply to this report is not delivered to anyone; when nothing remains, reply with exactly [SILENT]."),
     ]
       .filter(Boolean)
       .join("\n");

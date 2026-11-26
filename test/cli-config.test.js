@@ -262,6 +262,17 @@ test("trusting Inkbox tools is off until the profile or the environment turns it
   );
 });
 
+test("YOLO is off until the profile or the environment turns it on", (t) => {
+  const dir = home(t);
+  const env = { HOME: dir, INKBOX_PI_HOME: dir };
+  assert.equal(loadConfig(env).yolo, false);
+  assert.equal(loadConfig({ ...env, INKBOX_PI_YOLO: "true" }).yolo, true);
+  saveProfile(dir, { identity: "owner", yolo: true });
+  assert.equal(loadConfig(env).yolo, true);
+  assert.equal(loadConfig({ ...env, INKBOX_IDENTITY: "other" }).yolo, false);
+  assert.throws(() => loadConfig({ ...env, INKBOX_PI_YOLO: "on" }), /yolo/);
+});
+
 test("a saved approval timeout and tool list belong to the identity they were saved for", (t) => {
   const dir = home(t);
   const env = { HOME: dir, INKBOX_PI_HOME: dir };

@@ -43,7 +43,9 @@ const commandText = (route) =>
 // A known person is the same actor on every channel they write from.
 const actorOf = (route) => route.person ?? route.sender;
 // An approval question belongs to the conversation it was asked in.
-const askedIn = (route) => route.conversationThread ?? route.thread;
+const peerKey = (route) => "peer:" + route.channel + ":" + route.sender;
+const askedIn = (route) =>
+  route.followUp ? peerKey(route) : (route.conversationThread ?? route.thread);
 
 function flush(path) {
   const fd = openSync(path, "r");
@@ -240,15 +242,20 @@ export function createGatewayRuntime(
         .get(route.thread)
     )
       return "ignored";
-    // While an approval question is open, the asker's next message answers it.
-    if (
-      route.channel !== "a2a" &&
-      route.channel !== "external" &&
+    // While an approval question is open, the asker's next message answers
+    // it. A question about a finished call is asked on that person's line.
+    const offer = (key) =>
       permissions.answer(
-        askedIn(route),
+        key,
         route.sender,
         withoutMention(route.control ?? route.text, identity.agentHandle),
-      ) === "answered"
+      );
+    if (
+      !["a2a", "external", "call"].includes(route.channel) &&
+      (offer(askedIn(route)) ??
+        (["sms", "imessage"].includes(route.channel) && !route.group
+          ? offer(peerKey(route))
+          : null)) === "answered"
     ) {
       transaction(() => {
         db.prepare(
@@ -350,7 +357,9 @@ export function createGatewayRuntime(
 
   // Approval questions go to the conversation the turn is answering. Agent
   // tasks and sponsored group members have nobody who can approve.
-  function permissionFor(job, route, turnSignal) {
+  function permissionFor(job, source, turnSignal) {
+    // Questions about a finished call go to the line it used.
+    const route = source.replyVia ?? source;
     if (
       route.channel === "a2a" ||
       route.channel === "external" ||
@@ -383,6 +392,42 @@ export function createGatewayRuntime(
             identity,
           ),
       });
+  }
+
+  // A finished call is followed up on the line it used: by text for a call
+  // on the phone number, by iMessage for a call on the iMessage line.
+  async function callFollowUp(route) {
+    const target = {
+      followUp: true,
+      sender: route.sender,
+      group: false,
+      allowedSenders: config.allowedSenders ?? [],
+      allowedRecipients: config.outbound?.allowedRecipients ?? [],
+      groupReplyMode: "auto",
+    };
+    if (route.callOrigin === "dedicated_number")
+      return identity.phoneNumber?.number
+        ? { ...target, channel: "sms" }
+        : null;
+    if (
+      !route.callOrigin?.endsWith("imessage_number") ||
+      !identity.imessageEnabled
+    )
+      return null;
+    try {
+      const conversations = await identity.listIMessageConversations({
+        participants: [route.sender],
+        includeGroups: false,
+      });
+      const direct = conversations.find(
+        (item) => item.isGroup !== true && item.remoteNumber === route.sender,
+      );
+      return direct
+        ? { ...target, channel: "imessage", conversation: direct.id }
+        : null;
+    } catch {
+      return null;
+    }
   }
 
   async function processJob(job, signal) {
@@ -498,6 +543,11 @@ export function createGatewayRuntime(
       } else {
         route.contact = contact;
         if (route.group) route.memories = [];
+        if (route.channel === "call") {
+          const target = await callFollowUp(route);
+          if (signal.aborted) return;
+          if (target) route.replyVia = target;
+        }
         const notes = delivery.unread(job);
         route.deliveryContext = describeDelivery(notes);
         const file = pathFor(job.id);
@@ -541,7 +591,9 @@ export function createGatewayRuntime(
       }
     }
     if (closed || signal.aborted) return;
-    if (route.channel === "external" || route.channel === "call") {
+    // A finished call is answered on the line it used.
+    const destination = route.replyVia ?? route;
+    if (destination.channel === "external" || destination.channel === "call") {
       // A capture turn has no conversation to answer; the agent acted through tools.
       db.prepare("UPDATE jobs SET state='done', payload=NULL WHERE id=?").run(
         job.id,
@@ -556,11 +608,11 @@ export function createGatewayRuntime(
         db.prepare("UPDATE jobs SET state='sending' WHERE id=?").run(job.id);
       try {
         result = await reply(
-          route,
+          destination,
           boundedReply(
-            route.channel,
+            destination.channel,
             !job.command &&
-              ["sms", "imessage", "whatsapp"].includes(route.channel)
+              ["sms", "imessage", "whatsapp"].includes(destination.channel)
               ? stripMarkdown(answer)
               : answer,
           ),
@@ -583,16 +635,16 @@ export function createGatewayRuntime(
       let state = result?.skipped ? "ignored" : "done";
       if (
         result?.id &&
-        ["email", "sms", "imessage", "whatsapp"].includes(route.channel)
+        ["email", "sms", "imessage", "whatsapp"].includes(destination.channel)
       ) {
         db.prepare(
           "INSERT OR REPLACE INTO outbound(channel,message,job) VALUES(?,?,?)",
-        ).run(route.channel, result.id, job.id);
-        delivery.bind(job.id, route.channel, result.id);
+        ).run(destination.channel, result.id, job.id);
+        delivery.bind(job.id, destination.channel, result.id);
         state =
           db
             .prepare("SELECT state FROM notices WHERE channel=? AND message=?")
-            .get(route.channel, result.id)?.state ?? "done";
+            .get(destination.channel, result.id)?.state ?? "done";
       }
       mark.run(state, job.id);
     });

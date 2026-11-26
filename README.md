@@ -87,8 +87,9 @@ Every admitted email, SMS, iMessage, WhatsApp or Slack message, and every agent-
 Phone calls are conducted by Inkbox’s call agent, not by Pi. Pi starts a call with `inkbox_place_call`, giving it a purpose that becomes the call agent’s task, and reviews earlier calls with `inkbox_list_calls` and `inkbox_list_call_transcripts`. Placing a call asks for approval like any other Inkbox send.
 
 - **Incoming calls.** `inkbox-pi setup` asks whether Inkbox’s call agent should answer calls to the identity (default yes); `bootstrap` turns it on for an identity with a phone number or iMessage. The live call does not reach Pi.
-- **After a call.** When a call the call agent conducted ends, the gateway starts a turn in the caller’s session with a report: the outcome, the transcript and any follow-ups the call agent promised. Pi completes those follow-ups through its tools, for example by texting the other party. Its reply to the report is not sent to anyone.
-- **Approvals in that turn.** A finished-call report has nobody to ask, so no Pi tool runs and an Inkbox send needs `autoApproveInkboxTools` or `outbound.approval: "auto"`. Without one of them a promised follow-up text is refused.
+- **After a call.** When a call the call agent conducted ends, the gateway starts a turn in the caller’s session with a report: the outcome, the transcript and any follow-ups the call agent promised. Pi completes those follow-ups with its tools.
+- **Where the follow-up goes.** The turn continues on the line the call used. A call on the identity’s phone number is followed up by SMS to the other party; a call on an iMessage line is followed up in that person’s one-to-one iMessage conversation. Pi’s reply to the report is sent there, and approval questions are asked and answered there, so the turn can use Pi’s own tools like any other. Replying `[SILENT]` sends nothing.
+- **No line to continue on.** When the identity has no phone number for a text, or there is no iMessage conversation with the caller, the report has nobody to ask: no Pi tool runs, nothing is sent in reply, and an Inkbox send needs `autoApproveInkboxTools` or `outbound.approval: "auto"`.
 - Realtime voice from Pi itself is not included.
 
 ### Who the agent is talking to
@@ -136,6 +137,7 @@ Set these in the profile’s `config.json`, or in the environment of the command
 | Profile setting | Environment variable | Default | Meaning |
 |---|---|---|---|
 | `autoApproveInkboxTools` | `INKBOX_PI_AUTO_APPROVE_INKBOX_TOOLS` | `false` (setup asks, defaulting to yes; `bootstrap` saves `true`) | Run Inkbox tools without the question before each send, in the terminal and in messaging turns. Pi’s own tools still ask, and `outbound.allowedRecipients` still applies. |
+| `yolo` | `INKBOX_PI_YOLO` | `false` (setup asks, defaulting to no) | Run every tool in every messaging turn without asking anyone: shell commands, file edits and Inkbox sends, including in turns with nobody to ask. |
 | `autoAllowedTools` | `INKBOX_PI_AUTO_ALLOWED_TOOLS` (comma-separated) | `read`, `grep`, `find`, `ls` | Pi tools that run without asking when someone can be asked. With an empty list every Pi tool asks. |
 | `permissionTimeoutS` | `INKBOX_PERMISSION_TIMEOUT_S` | `600` | Seconds an approval question waits for an answer, from 10 to 1500. |
 | `outbound.approval` | (profile only) | `ask` | `ask`, `allowlist` or `auto`, as described under [Using the extension](#using-the-extension). |
@@ -149,6 +151,7 @@ Anyone admitted by the identity’s contact rules, and by `allowedSenders` when 
 - The Inkbox tools that do not ask are available to every admitted sender, including agent-to-agent tasks and sponsored group members. They can have the agent read the identity’s mail, message history, contacts and notes, and change contacts and notes.
 - An email sender is identified by the From address Inkbox reports for the message. The gateway adds no challenge of its own.
 - Restrict who can reach the identity with its contact rules in Inkbox. In addition, set `INKBOX_PI_ALLOWED_SENDERS` (or `allowedSenders` in the profile) to the exact email addresses and phone numbers the gateway should answer. Write a Slack sender as `TEAM-ID:USER-ID` and a calling agent by its handle.
+- `yolo` removes every approval. Anyone the identity’s contact rules admit, including another agent sending a task, can then run commands and change files on the machine as the gateway’s user. Turn it on only when everyone who can reach the identity is someone you would give a shell to.
 - `autoApproveInkboxTools` lets every admitted sender, including agent-to-agent tasks and sponsored group members, have the agent send email and messages as the identity without a question. Leave it off, or set `outbound.allowedRecipients`, when the identity is reachable by people you would not let send on its behalf.
 - Keep the approval list tight. Every tool added to `autoAllowedTools` runs with no question for every sender who can approve. `outbound.approval: "auto"` removes the question for sends from every admitted sender, including agent-to-agent tasks and sponsored group members. Use `outbound.allowedRecipients` to bound where messages can go.
 - Credential (vault) tools stay locked in gateway turns, because `INKBOX_PI_VAULT_KEY` is not passed to them.

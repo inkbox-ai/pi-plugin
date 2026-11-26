@@ -54,7 +54,11 @@ export default function gatewayTurn(pi: ExtensionAPI) {
     });
     const automatic = new Set(turn.autoAllowedTools);
     pi.on("tool_call", async (event, ctx) => {
-      if (event.toolName.startsWith("inkbox_") || automatic.has(event.toolName))
+      if (
+        event.toolName.startsWith("inkbox_") ||
+        automatic.has("*") ||
+        automatic.has(event.toolName)
+      )
         return;
       if (
         await ask(

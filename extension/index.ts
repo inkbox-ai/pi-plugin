@@ -109,7 +109,10 @@ export function registerInkbox(
         (config as { signingKeyConfigured?: boolean }).signingKeyConfigured,
     ),
     outboundApproval: deps.config.outbound.approval,
-    inkboxToolsAutoApproved: Boolean(config.autoApproveInkboxTools),
+    inkboxToolsAutoApproved: Boolean(
+      config.autoApproveInkboxTools || config.yolo,
+    ),
+    yolo: Boolean(config.yolo),
     enabledTools: tools
       .filter((t) => isToolEnabled(t, enabled, disabled))
       .map((t) => t.name),
@@ -204,6 +207,7 @@ export function registerInkbox(
           confirm: async (title, message, patterns) =>
             // The operator chose to trust Inkbox tools; recipient rules still apply.
             config.autoApproveInkboxTools === true ||
+            config.yolo === true ||
             (gateway
               ? gateway.confirm(ctx, { title, message, patterns }, signal)
               : ctx.hasUI && (await ctx.ui.confirm(title, message, { signal }))),

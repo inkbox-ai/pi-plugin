@@ -191,6 +191,7 @@ test("a messaging turn starts Pi with its tools, skills and one-time turn settin
       tools: { disable: ["inkbox_place_call"] },
       outbound: { approval: "ask" },
       slackEnabled: false,
+      autoApproveInkboxTools: false,
       signingKeyConfigured: false,
     },
   });
@@ -204,6 +205,20 @@ test("a messaging turn starts Pi with its tools, skills and one-time turn settin
     attended,
   );
   assert.deepEqual(configured.turn.autoAllowedTools, ["read"]);
+});
+test("YOLO runs every tool unasked, also with nobody to ask", async (t) => {
+  const config = { identity: "fixture", yolo: true, autoAllowedTools: [] };
+  const task = {
+    channel: "a2a",
+    sender: "peer",
+    conversation: "task",
+    text: "Do it",
+  };
+  const nobody = Object.assign(async () => "reject", { unattended: true });
+  const seen = await launch(t, config, task, nobody);
+  assert.deepEqual(seen.turn.autoAllowedTools, ["*"]);
+  assert.equal(seen.turn.profile.autoApproveInkboxTools, true);
+  assert.doesNotMatch(seen.turn.context, /No one in this turn can approve/);
 });
 test("with nobody to ask, no Pi tool runs unasked", async (t) => {
   const config = { identity: "fixture", autoAllowedTools: ["read", "bash"] };

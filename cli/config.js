@@ -201,6 +201,10 @@ export function loadConfig(env = process.env) {
     false;
   if (![true, false, "true", "false"].includes(trustSetting))
     throw new Error("Choose true or false for autoApproveInkboxTools.");
+  const yoloSetting =
+    env.INKBOX_PI_YOLO ?? (sameIdentity ? saved.yolo : undefined) ?? false;
+  if (![true, false, "true", "false"].includes(yoloSetting))
+    throw new Error("Choose true or false for yolo.");
   const permissionTimeoutS = Number(
     env.INKBOX_PERMISSION_TIMEOUT_S ||
       (sameIdentity && saved.permissionTimeoutS) ||
@@ -225,6 +229,8 @@ export function loadConfig(env = process.env) {
     permissionTimeoutS,
     // Run Inkbox tools without the per-call question. Pi's own tools still ask.
     autoApproveInkboxTools: trustSetting === true || trustSetting === "true",
+    // Run every tool in a messaging turn without asking anyone.
+    yolo: yoloSetting === true || yoloSetting === "true",
     // Pi tools that run in a messaging turn without asking the conversation.
     autoAllowedTools:
       env.INKBOX_PI_AUTO_ALLOWED_TOOLS === undefined &&
